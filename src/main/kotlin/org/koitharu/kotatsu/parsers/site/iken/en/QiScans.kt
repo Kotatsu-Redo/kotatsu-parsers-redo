@@ -9,7 +9,7 @@ import java.util.EnumSet
 
 @MangaSourceParser("QISCANS", "Qi Scans", "en")
 internal class QiScans(context: MangaLoaderContext) :
-    IkenParser(context, MangaParserSource.QISCANS, "qiscans.org", 18, true) {
+    IkenParser(context, MangaParserSource.QISCANS, "qimanhwa.com", 18, true) {
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.POPULARITY,
