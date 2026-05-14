@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.en
 
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Headers
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -22,6 +23,16 @@ internal class MangaCloud(context: MangaLoaderContext) :
 
 	private val apiUrl = "https://api.mangacloud.org"
 	private val cdnUrl = "https://pika.mangacloud.org"
+
+	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+		super.onCreateConfig(keys)
+		keys.add(userAgentKey)
+		keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+	}
+
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.set("Referer", "https://$domain/")
+		.build()
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
@@ -284,15 +295,21 @@ internal class MangaCloud(context: MangaLoaderContext) :
 		val chapterId = chapterData.getString("chapterId")
 		val comicId = chapterData.getString("comicId")
 
-		val response = webClient.httpGet("$apiUrl/chapter/$chapterId").parseJson()
+		val response = webClient.httpGet("$apiUrl/chapter2/$chapterId").parseJson()
 		val data = response.getJSONObject("data")
 		val images = data.getJSONArray("images")
+		val actualComicId = data.optString("comicId", comicId)
+		val actualChapterId = data.optString("id", chapterId)
 
 		return (0 until images.length()).map { i ->
 			val img = images.getJSONObject(i)
+			val format = img.optString("format")
+				.nullIfEmpty()
+				?: img.optString("f").nullIfEmpty()
+				?: "jpg"
 			MangaPage(
 				id = generateUid("$chapterId-$i"),
-				url = "$cdnUrl/$comicId/$chapterId/${img.getString("id")}.${img.getString("f")}",
+				url = "$cdnUrl/$actualComicId/$actualChapterId/${img.getString("id")}.$format",
 				preview = null,
 				source = source,
 			)

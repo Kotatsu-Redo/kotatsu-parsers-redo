@@ -2,7 +2,10 @@ package org.koitharu.kotatsu.parsers.site.madtheme
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
+import okhttp3.Response
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
@@ -66,6 +69,38 @@ internal abstract class MadthemeParser(
 
 	protected open val listUrl = "search/"
 	protected open val datePattern = "MMM dd, yyyy"
+
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.add("Referer", "https://$domain/")
+		.build()
+
+	override fun intercept(chain: okhttp3.Interceptor.Chain): Response {
+		val request = chain.request()
+		val url = request.url
+		val fragment = url.fragment
+
+		if (fragment != null && (fragment.startsWith("https://") || fragment.startsWith("http://"))) {
+			val cleanUrl = url.newBuilder().fragment(null).build()
+			val response = chain.proceed(request.newBuilder().url(cleanUrl).build())
+			if (response.isSuccessful) {
+				return response
+			}
+			response.close()
+			return chain.proceed(request.newBuilder().url(fragment).build())
+		}
+
+		val response = chain.proceed(request)
+		if (!response.isSuccessful && fragment == IMAGE_REQUEST_FRAGMENT) {
+			response.close()
+			val fallbackUrl = url.newBuilder()
+				.host(IMAGE_FALLBACK_HOST)
+				.encodedPath(url.encodedPath.replaceFirst("/res/", "/"))
+				.fragment(null)
+				.build()
+			return chain.proceed(request.newBuilder().url(fallbackUrl).build())
+		}
+		return response
+	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val url = buildString {
@@ -232,38 +267,89 @@ internal abstract class MadthemeParser(
 	protected open val selectPage = "div#chapter-images img"
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.toAbsoluteUrl(domain)
+		val fullUrl = chapter.url.normalizedChapterUrl()
 		val doc = webClient.httpGet(fullUrl).parseHtml()
 		val known = HashSet<String>()
 		val result = ArrayList<MangaPage>()
 		// html parisng
 		doc.select(selectPage).forEach { img ->
-			val url = img.requireSrc().toRelativeUrl(domain)
-			if (known.add(url)) {
-				result += MangaPage(
-					id = generateUid(url),
-					url = url,
-					preview = null,
-					source = source,
-				)
-			}
+			result.addPage(known, img.resolveImageUrl())
 		}
 		// js parsing
 		val regexPages = Regex("chapImages\\s*=\\s*['\"](.*?)['\"]")
+		val mainServer = doc.select("script").firstNotNullOfOrNull { script ->
+			Regex("mainServer\\s*=\\s*\"(.*?)\"").find(script.html())?.groupValues?.getOrNull(1)
+		}
+		val schemePrefix = if (mainServer?.startsWith("//") == true) "https:" else ""
 		val pages = doc.select("script").firstNotNullOfOrNull { script ->
 			regexPages.find(script.html())?.groupValues?.getOrNull(1)
 		}?.split(',')
 		pages?.forEach { url ->
-			if (known.add(url)) {
-				result += MangaPage(
+			val pageUrl = if (mainServer.isNullOrEmpty()) {
+				url.resolveChapterImageUrl()
+			} else {
+				"$schemePrefix$mainServer$url"
+			}
+			result.addPage(known, pageUrl)
+		}
+		return result
+	}
+
+	override suspend fun getPageUrl(page: MangaPage): String {
+		val url = page.url.toAbsoluteUrl(domain)
+		return if ('#' in url) url else "$url#$IMAGE_REQUEST_FRAGMENT"
+	}
+
+	private fun MutableList<MangaPage>.addPage(known: MutableSet<String>, url: String) {
+		if (known.add(url)) {
+			add(
+				MangaPage(
 					id = generateUid(url),
 					url = url,
 					preview = null,
 					source = source,
-				)
-			}
+				),
+			)
 		}
-		return result
+	}
+
+	private fun Element.resolveImageUrl(): String {
+		val primary = requireSrc()
+		val rawFallback = attr("onerror")
+			.substringAfter("this.src='", "")
+			.substringBefore("'")
+			.takeIf { it.isNotBlank() }
+			?: return primary
+		val fallback = rawFallback.resolveChapterImageUrl()
+			.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+			?: return primary
+
+		return if ("://s20." in primary) fallback else "$primary#$fallback"
+	}
+
+	private fun String.resolveChapterImageUrl(): String {
+		val value = trim()
+		return when {
+			value.startsWith("https://") || value.startsWith("http://") -> value
+			value.startsWith("//") -> "https:$value"
+			value.contains("/manga/") && !value.contains("/wp-content/") ->
+				"https://$IMAGE_FALLBACK_HOST/manga${value.substringAfter("/manga")}"
+			value.startsWith("/") -> "https://$domain$value"
+			else -> value.toAbsoluteUrl(domain)
+		}
+	}
+
+	private fun String.normalizedChapterUrl(): String {
+		val value = trim()
+		if (value.startsWith("https://") || value.startsWith("http://")) {
+			val schemeEnd = value.indexOf("://")
+			val pathStart = value.indexOf('/', startIndex = schemeEnd + 3)
+			if (pathStart == -1) return value
+			val prefix = value.substring(0, pathStart)
+			val path = value.substring(pathStart).replace(Regex("/{2,}"), "/")
+			return prefix + path
+		}
+		return value.toAbsoluteUrl(domain)
 	}
 
 	protected fun parseChapterDate(dateFormat: DateFormat, date: String?): Long {
@@ -319,6 +405,11 @@ internal abstract class MadthemeParser(
 
 			else -> 0
 		}
+	}
+
+	private companion object {
+		private const val IMAGE_REQUEST_FRAGMENT = "image-request"
+		private const val IMAGE_FALLBACK_HOST = "sb.mbcdn.xyz"
 	}
 
 }
