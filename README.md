@@ -63,6 +63,7 @@ JVM and Android applications.
 - [kotatsu-dl](https://github.com/KotatsuApp/kotatsu-dl)
 - [Shirizu (WIP)](https://github.com/ztimms73/shirizu)
 - [OtakuWorld](https://github.com/jakepurple13/OtakuWorld)
+- [Futon](https://github.com/AppFuton/Futon)
 
 ## Contribution
 
