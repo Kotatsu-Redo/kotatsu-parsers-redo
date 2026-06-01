@@ -3,6 +3,8 @@ package org.koitharu.kotatsu.parsers.site.en
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
+import okhttp3.Interceptor
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -11,6 +13,7 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
+import org.koitharu.kotatsu.parsers.bitmap.Rect
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
 import java.net.URLDecoder
@@ -19,7 +22,7 @@ import java.util.*
 
 @MangaSourceParser("COMIX", "Comix", "en", ContentType.MANGA)
 internal class Comix(context: MangaLoaderContext) :
-    PagedMangaParser(context, MangaParserSource.COMIX, 28) {
+    PagedMangaParser(context, MangaParserSource.COMIX, 28), Interceptor {
 
     override val configKeyDomain = ConfigKey.Domain("comix.to")
 
@@ -727,6 +730,85 @@ internal class Comix(context: MangaLoaderContext) :
         }
     }
 
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        var response = chain.proceed(request)
+
+        if (response.code == 404) {
+            val url = request.url.toString()
+            val fallbacks = listOf("/si/", "/i/", "/sii/", "/ii/")
+                .map { url.replaceFirst(SCRAMBLE_PATH_FALLBACK_REGEX, it) }
+                .filter { it != url }
+
+            if (fallbacks.isNotEmpty()) {
+                var lastResponse = response
+                for (fallbackUrl in fallbacks) {
+                    lastResponse.close()
+                    lastResponse = chain.proceed(request.newBuilder().url(fallbackUrl).build())
+                    if (lastResponse.code != 404) break
+                }
+                response = lastResponse
+            }
+        }
+
+        if (!response.isSuccessful) return response
+
+        val seed = response.header("x-scramble-seed")?.toLongOrNull()?.toInt()
+            ?: return response
+
+        if (seed == 0) return response
+
+        return context.redrawImageResponse(response) { bitmap ->
+            val width = bitmap.width
+            val height = bitmap.height
+            val tileW = width / GRID_COLS
+            val tileH = height / GRID_ROWS
+
+            val perm = buildOrder(seed, NUM_TILES)
+            val result = context.createBitmap(width, height)
+
+            result.drawBitmap(bitmap, Rect(0, 0, width, height), Rect(0, 0, width, height))
+
+            for (srcIdx in 0 until NUM_TILES) {
+                val dstIdx = perm[srcIdx]
+                val srcCol = srcIdx % GRID_COLS
+                val srcRow = srcIdx / GRID_COLS
+                val dstCol = dstIdx % GRID_COLS
+                val dstRow = dstIdx / GRID_COLS
+
+                val srcRect = Rect(
+                    srcCol * tileW,
+                    srcRow * tileH,
+                    (srcCol + 1) * tileW,
+                    (srcRow + 1) * tileH,
+                )
+                val dstRect = Rect(
+                    dstCol * tileW,
+                    dstRow * tileH,
+                    (dstCol + 1) * tileW,
+                    (dstRow + 1) * tileH,
+                )
+
+                result.drawBitmap(bitmap, srcRect, dstRect)
+            }
+
+            result
+        }
+    }
+
+    private fun buildOrder(seed: Int, n: Int): IntArray {
+        val arr = IntArray(n) { it }
+        var state = seed
+        for (i in n - 1 downTo 1) {
+            state = state * LCG_MULTIPLIER + LCG_INCREMENT
+            val j = (state.toLong() and 0xFFFFFFFFL) % (i + 1)
+            val tmp = arr[i]
+            arr[i] = arr[j.toInt()]
+            arr[j.toInt()] = tmp
+        }
+        return arr
+    }
+
     private companion object {
         private val NSFW_RATINGS = setOf("erotica", "pornographic")
         private val TERM_KEYS = arrayOf("genres", "genre", "tags", "theme", "demographics", "demographic", "formats")
@@ -740,5 +822,12 @@ internal class Comix(context: MangaLoaderContext) :
         private const val INTERCEPT_ERROR_URL = "https://kotatsu.intercept/error"
         private val INTERCEPT_URL_REGEX = Regex("https://kotatsu\\.intercept/.*", RegexOption.IGNORE_CASE)
         private const val CLOUDFLARE_MESSAGE = "Cloudflare verification is required. Open Comix in the in-app browser, complete the check, then try again."
+
+        private const val GRID_COLS = 5
+        private const val GRID_ROWS = 5
+        private const val NUM_TILES = GRID_COLS * GRID_ROWS
+        private const val LCG_MULTIPLIER = 1664525
+        private const val LCG_INCREMENT = 1013904223
+        private val SCRAMBLE_PATH_FALLBACK_REGEX = Regex("/s?i+/")
     }
 }
