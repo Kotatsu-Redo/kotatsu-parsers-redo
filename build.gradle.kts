@@ -20,6 +20,10 @@ ksp {
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions {
+        // Compile with whatever JDK the toolchain selects, but keep emitting
+        // Java 17 bytecode so the published artifact's runtime requirement is
+        // unchanged regardless of the local toolchain version.
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
         freeCompilerArgs.addAll(
             "-opt-in=kotlin.RequiresOptIn",
             "-opt-in=kotlin.contracts.ExperimentalContracts",
@@ -30,9 +34,16 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
     explicitApiWarning()
     sourceSets["main"].kotlin.srcDirs("build/generated/ksp/main/kotlin")
+}
+
+// Keep the Java target aligned with the Kotlin bytecode target (17) so the
+// java-library tasks stay consistent even when built with a newer JDK toolchain.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 publishing {
