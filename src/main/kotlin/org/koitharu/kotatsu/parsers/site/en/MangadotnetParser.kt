@@ -329,7 +329,12 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 			response.getJSONObject(i)
 		}
 
-		val chaptersByTeam = mutableMapOf<String, MutableList<JSONObject>>()
+		// Group chapters by the team that actually scanlated them, so each branch
+		// holds only that team's own chapters. (Earlier this back-filled a team's
+		// missing chapter numbers with another team's chapters, which both showed
+		// chapters under a team that never produced them and left `branch` and
+		// `scanlator` disagreeing for those borrowed entries.)
+		val chaptersByTeam = LinkedHashMap<String, MutableList<JSONObject>>()
 		for (chapter in allChapters) {
 			val group = chapter.optString("group_name", "").nullIfEmpty()
 			val scanlator = chapter.optString("scanlator_name", "").nullIfEmpty()
@@ -337,25 +342,16 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 			chaptersByTeam.getOrPut(teamName) { mutableListOf() }.add(chapter)
 		}
 
-		val allChapterNumbers = allChapters.map { it.optDouble("chapter_number", 0.0).toFloat() }.toSet().sorted()
-
-		val chaptersBuilder = ChaptersListBuilder(allChapters.size * chaptersByTeam.size)
+		val chaptersBuilder = ChaptersListBuilder(allChapters.size)
 
 		for ((teamName, teamChapters) in chaptersByTeam) {
-			val teamChapterMap = teamChapters.associateBy { it.optDouble("chapter_number", 0.0).toFloat() }
+			val sortedChapters = teamChapters.sortedBy { it.optDouble("chapter_number", 0.0) }
 
-			for (chapterNumber in allChapterNumbers) {
-				val chapterData = teamChapterMap[chapterNumber]
-					?: allChapters.find { it.optDouble("chapter_number", 0.0).toFloat() == chapterNumber }
-					?: continue
-
+			for (chapterData in sortedChapters) {
 				val chapterId = chapterData.getString("id")
 				val chapterSource = chapterData.optString("source", "scraper")
 				val number = chapterData.optDouble("chapter_number", 0.0).toFloat()
 				val name = chapterData.optString("chapter_title", "").nullIfEmpty()
-				val group = chapterData.optString("group_name", "").nullIfEmpty()
-				val scanlator = chapterData.optString("scanlator_name", "").nullIfEmpty()
-				val actualTeamName = group ?: scanlator ?: "Unknown"
 				val date = chapterData.optString("date_added", "").nullIfEmpty()
 
 				val title = buildString {
@@ -379,7 +375,7 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 					}.toString(),
 					uploadDate = date?.let { dateFormat.parseSafe(it) } ?: 0L,
 					source = source,
-					scanlator = actualTeamName,
+					scanlator = teamName,
 					branch = teamName,
 				)
 
