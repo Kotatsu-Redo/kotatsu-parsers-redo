@@ -1,4 +1,4 @@
-package org.koitharu.kotatsu.parsers.site.mangareader.id
+package org.koitharu.kotatsu.parsers.site.id
 
 import okhttp3.Headers
 import org.json.JSONObject
@@ -14,7 +14,7 @@ import java.util.*
 internal class AinzScans(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.AINZSCANS, pageSize = 30, searchPageSize = 30) {
 
-	override val configKeyDomain = ConfigKey.Domain("api.ainzscans01.com")
+	override val configKeyDomain = ConfigKey.Domain("v2.ainzscans01.com")
 
 	override val sourceLocale: Locale = Locale.ENGLISH
 
@@ -30,12 +30,12 @@ internal class AinzScans(context: MangaLoaderContext) :
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
 			isSearchSupported = true,
-			isMultipleTagsSupported = true,
+			isMultipleTagsSupported = false,
 			isTagsExclusionSupported = false,
 		)
 
 	override suspend fun getFavicons(): Favicons {
-		return Favicons.single("https://$domain/api/uploads/site-branding/favicon-1773679687168-jsyhcr.png")
+		return Favicons.single("https://api.ainzscans01.com/api/uploads/site-branding/favicon-1773679687168-jsyhcr.png")
 	}
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
@@ -47,15 +47,15 @@ internal class AinzScans(context: MangaLoaderContext) :
 	}
 
 	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
-		.add("Referer", "https://v1.ainzscans01.com/")
-		.add("Origin", "https://v1.ainzscans01.com")
+		.add("Referer", "https://$domain/")
+		.add("Origin", "https://$domain")
 		.build()
 
 	private var genreCache: Map<String, MangaTag>? = null
 
 	private suspend fun fetchGenreMap(): Map<String, MangaTag> {
 		genreCache?.let { return it }
-		val url = "https://$domain/api/genres"
+		val url = "https://api.ainzscans01.com/api/genres"
 		val jsonStr = webClient.httpGet(url).body?.string() ?: return emptyMap()
 		val map = mutableMapOf<String, MangaTag>()
 		try {
@@ -80,9 +80,7 @@ internal class AinzScans(context: MangaLoaderContext) :
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val url = buildString {
-			append("https://")
-			append(domain)
-			append("/api/search?type=COMIC")
+			append("https://api.ainzscans01.com/api/search?type=COMIC")
 			append("&limit=").append(pageSize)
 			append("&page=").append(page)
 
@@ -147,7 +145,7 @@ internal class AinzScans(context: MangaLoaderContext) :
 				val slug = obj.optString("slug")
 				if (slug.isEmpty()) continue
 
-				val relativeUrl = "/series/$slug"
+				val relativeUrl = "/comic/$slug"
 				val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
 				val state = when (obj.optString("comic_status").uppercase()) {
 					"ONGOING" -> MangaState.ONGOING
@@ -161,7 +159,7 @@ internal class AinzScans(context: MangaLoaderContext) :
 					url = relativeUrl,
 					title = obj.optString("title").ifEmpty { slug },
 					altTitles = emptySet(),
-					publicUrl = "https://$domain/series/$slug",
+					publicUrl = "https://$domain/comic/$slug",
 					rating = rating,
 					contentRating = ContentRating.SAFE,
 					coverUrl = obj.optString("poster_image_url").nullIfEmpty(),
@@ -179,8 +177,8 @@ internal class AinzScans(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val slug = manga.url.substringAfter("/series/")
-		val url = "https://$domain/api/series/comic/$slug"
+		val slug = manga.url.substringAfter("/comic/")
+		val url = "https://api.ainzscans01.com/api/series/comic/$slug"
 
 		val json = webClient.httpGet(url).body?.string()
 			?: throw Exception("Failed to fetch manga details")
@@ -191,7 +189,7 @@ internal class AinzScans(context: MangaLoaderContext) :
 		try {
 			val obj = JSONObject(json)
 			val slug = obj.optString("slug")
-			val relativeUrl = "/series/$slug"
+			val relativeUrl = "/comic/$slug"
 
 			val description = obj.optString("synopsis").nullIfEmpty()
 			val rating = obj.optString("rating_average").toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN
@@ -238,7 +236,7 @@ internal class AinzScans(context: MangaLoaderContext) :
 				val chapterSlug = obj.optString("slug")
 				if (chapterSlug.isEmpty()) continue
 
-				val chapterUrl = "/series/$seriesSlug/chapter/$chapterSlug"
+				val chapterUrl = "/comic/$seriesSlug/chapter/$chapterSlug"
 				val numberStr = obj.optString("number")
 				val number = numberStr.toFloatOrNull() ?: (result.size + 1).toFloat()
 
@@ -262,9 +260,9 @@ internal class AinzScans(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val seriesSlug = chapter.url.substringAfter("/series/").substringBefore("/chapter")
+		val seriesSlug = chapter.url.substringAfter("/comic/").substringBefore("/chapter")
 		val chapterSlug = chapter.url.substringAfter("/chapter/")
-		val url = "https://$domain/api/series/comic/$seriesSlug/chapter/$chapterSlug"
+		val url = "https://api.ainzscans01.com/api/series/comic/$seriesSlug/chapter/$chapterSlug"
 
 		val json = webClient.httpGet(url).body?.string()
 			?: throw Exception("Failed to fetch chapter pages")
