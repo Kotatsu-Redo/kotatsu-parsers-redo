@@ -6,6 +6,7 @@ import kotlinx.coroutines.sync.withLock
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Response
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -266,6 +267,7 @@ internal abstract class NineMangaParser(
         return 0L
     }
 
+    @Broken
     @MangaSourceParser("NINEMANGA_EN", "NineManga English", "en")
     class English(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -273,6 +275,7 @@ internal abstract class NineMangaParser(
         "www.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_ES", "NineManga Español", "es")
     class Spanish(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -280,6 +283,7 @@ internal abstract class NineMangaParser(
         "es.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_RU", "NineManga Русский", "ru")
     class Russian(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -287,6 +291,7 @@ internal abstract class NineMangaParser(
         "ru.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_DE", "NineManga Deutsch", "de")
     class Deutsch(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -294,6 +299,7 @@ internal abstract class NineMangaParser(
         "de.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_BR", "NineManga Brasil", "pt")
     class Brazil(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -301,6 +307,7 @@ internal abstract class NineMangaParser(
         "br.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_IT", "NineManga Italiano", "it")
     class Italiano(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -308,6 +315,7 @@ internal abstract class NineMangaParser(
         "it.ninemanga.com",
     )
 
+    @Broken
     @MangaSourceParser("NINEMANGA_FR", "NineManga Français", "fr")
     class Francais(context: MangaLoaderContext) : NineMangaParser(
         context,

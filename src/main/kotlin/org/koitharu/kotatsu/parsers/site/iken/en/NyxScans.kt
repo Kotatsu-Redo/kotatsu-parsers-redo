@@ -102,32 +102,6 @@ internal class NyxScans(context: MangaLoaderContext) :
 			?.firstOrNull()
 	}
 
-	private suspend fun readChapterImages(chapterId: Long): List<MangaPage> {
-		if (chapterId <= 0L) return emptyList()
-		val json = webClient.httpGet("https://$defaultDomain/api/chapter?chapterId=$chapterId").parseJson()
-		val chapterJson = json.optJSONObject("chapter") ?: return emptyList()
-		if (chapterJson.optBoolean("isLocked", false)) {
-			throw Exception("Need to unlock chapter!")
-		}
-		val images = chapterJson.optJSONArray("images")
-			?.mapJSONNotNull { item ->
-				item.optString("url")
-					.ifBlank { item.optString("src") }
-					.ifBlank { item.optString("image") }
-					.replace("/public//", "/public/")
-					.takeIf { it.isNotBlank() }
-			}
-			.orEmpty()
-		return images.map { url ->
-			MangaPage(
-				id = generateUid(url),
-				url = url,
-				preview = null,
-				source = source,
-			)
-		}
-	}
-
 	private suspend fun parsePopularManga(): List<Manga> {
 		val json = webClient.httpGet("https://$domain").parseHtml().getNextJson("popularPosts")
 		return JSONArray(json).mapJSONNotNull {

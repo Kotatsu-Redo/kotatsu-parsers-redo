@@ -17,7 +17,7 @@ internal class Komikcast(context: MangaLoaderContext) :
 	)
 
     val searchPageSize = 28
-    override val configKeyDomain = ConfigKey.Domain("be.komikcast.fit")
+    override val configKeyDomain = ConfigKey.Domain("be.komikcast.cc")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,

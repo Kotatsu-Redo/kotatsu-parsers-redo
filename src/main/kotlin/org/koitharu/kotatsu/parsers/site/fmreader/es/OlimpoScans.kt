@@ -71,7 +71,7 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		if (!filter.query.isNullOrBlank()) {
-			return search(page, filter.query)
+			return search(page, filter.query.orEmpty())
 		}
 		if (filter.isEmpty()) {
 			when (order) {
@@ -119,14 +119,12 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	}
 
 	private suspend fun search(page: Int, query: String): List<Manga> {
-		if (page > 1) return emptyList()
-		if (query.length < 3) return emptyList()
-		val url = apiUrl("api/search").newBuilder()
-			.addQueryParameter("name", query.take(40))
-			.build()
-		val root = webClient.httpGet(url, getRequestHeaders()).parseJson()
-		val items = root.optJSONArray("data") ?: JSONArray()
-		return parseSeriesList(items)
+		val items = fetchSeriesList()
+			.filter { it.optString("name").contains(query, ignoreCase = true) }
+		return items
+			.drop((page - 1) * pageSize)
+			.take(pageSize)
+			.mapNotNull(::parseSeries)
 	}
 
 	private suspend fun browse(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
@@ -157,19 +155,17 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	}
 
 	private suspend fun getPopularPage(page: Int): List<Manga> {
-		if (page > 1) return emptyList()
-		val root = webClient.httpGet(apiUrl("api/sf/home"), getRequestHeaders()).parseJson()
-		val data = root.optJSONObject("data") ?: return emptyList()
-		val popular = when (val raw = data.opt("popular_comics")) {
-			is JSONArray -> raw
-			is String -> runCatching { JSONArray(raw) }.getOrNull()
-			else -> null
-		} ?: return emptyList()
-		return parseSeriesList(popular)
+		val url = siteUrl("api/rankings").newBuilder()
+			.addQueryParameter("page", page.toString())
+			.addQueryParameter("period", "total_ranking")
+			.build()
+		val root = webClient.httpGet(url, getRequestHeaders()).parseJson()
+		val items = root.optJSONArray("data") ?: JSONArray()
+		return parseSeriesList(items)
 	}
 
 	private suspend fun getLatestPage(page: Int): List<Manga> {
-		val url = apiUrl("api/sf/new-chapters").newBuilder()
+		val url = siteUrl("api/new-chapters").newBuilder()
 			.addQueryParameter("page", page.toString())
 			.build()
 		val root = webClient.httpGet(url, getRequestHeaders()).parseJson()
@@ -326,17 +322,44 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 
 	private fun publicMangaUrl(slug: String): String = "https://$domain/series/comic-$slug"
 
-	private fun detailsUrl(slug: String) = apiUrl("api/series/$slug").newBuilder()
+	private fun detailsUrl(slug: String) = siteUrl("api/series/$slug").newBuilder()
 		.addQueryParameter("type", "comic")
 		.build()
 
-	private fun chapterPagesUrl(slug: String, chapterId: String) = apiUrl("api/series/$slug/chapters/$chapterId").newBuilder()
-		.addQueryParameter("type", "comic")
-		.build()
+	private fun chapterPagesUrl(slug: String, chapterId: String) = siteUrl("api/capitulo/comic-$slug/$chapterId")
 
 	private fun apiUrl(path: String) = "https://dashboard.$domain/${path.removePrefix("/")}".toHttpUrl()
 
+	private fun siteUrl(path: String) = "https://$domain/${path.removePrefix("/")}".toHttpUrl()
+
+	private suspend fun fetchSeriesList(): List<JSONObject> {
+		val now = System.currentTimeMillis()
+		seriesListCache?.takeIf { now - seriesListCacheTime < SERIES_LIST_CACHE_DURATION }?.let {
+			return it
+		}
+		val root = webClient.httpGet(siteUrl("api/series/list"), getRequestHeaders()).parseJson()
+		val items = root.optJSONArray("data") ?: JSONArray()
+		val result = ArrayList<JSONObject>(items.length())
+		for (i in 0 until items.length()) {
+			val item = items.optJSONObject(i) ?: continue
+			if (item.optString("type").ifBlank { "comic" } == "comic") {
+				result += item
+			}
+		}
+		seriesListCache = result
+		seriesListCacheTime = now
+		return result
+	}
+
 	private companion object {
+		private const val SERIES_LIST_CACHE_DURATION = 60 * 60 * 1000L
+
+		@Volatile
+		private var seriesListCache: List<JSONObject>? = null
+
+		@Volatile
+		private var seriesListCacheTime = 0L
+
 		private val dateFormats = listOf(
 			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", Locale.US),
 			SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US),

@@ -136,7 +136,7 @@ internal class HentaiUkrParser(context: MangaLoaderContext) : AbstractMangaParse
 		return htmlPages.select("img.image").mapIndexed { i, page ->
 			MangaPage(
 				id = generateUid(i.toString()),
-				"https://$domain${page.attr("src")}",
+				"https://$domain${chapter.url}${page.attr("src")}",
 				null,
 				source,
 			)

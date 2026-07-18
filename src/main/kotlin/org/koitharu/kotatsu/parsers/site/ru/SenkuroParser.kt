@@ -36,11 +36,12 @@ import java.util.LinkedHashMap
 import java.util.LinkedHashSet
 import java.util.Locale
 
+
 @MangaSourceParser("SENKURO", "Senkuro", "ru")
 internal class SenkuroParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.SENKURO, pageSize = PAGE_SIZE) {
 
-	override val configKeyDomain = ConfigKey.Domain("senkuro.me", "senkuro.com")
+	override val configKeyDomain = ConfigKey.Domain("senkuro.com")
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -545,9 +546,9 @@ internal class SenkuroParser(context: MangaLoaderContext) :
 				%type: MangaTachiyomiSearchTypeFilter,
 				%status: MangaTachiyomiSearchStatusFilter,
 				%translationStatus: MangaTachiyomiSearchTranslationStatusFilter,
-				%label: MangaTachiyomiSearchGenreFilter,
-				%format: MangaTachiyomiSearchGenreFilter,
-				%rating: MangaTachiyomiSearchTagFilter,
+				%label: MangaTachiyomiSearchLabelFilter,
+				%format: MangaTachiyomiSearchFormatFilter,
+				%rating: MangaTachiyomiSearchRatingFilter,
 				%offset: Int
 			) {
 				mangaTachiyomiSearch(

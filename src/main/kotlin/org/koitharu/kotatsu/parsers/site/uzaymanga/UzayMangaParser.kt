@@ -3,13 +3,11 @@ package org.koitharu.kotatsu.parsers.site.uzaymanga
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
-import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaChapter
@@ -446,106 +444,13 @@ internal abstract class UzayMangaParser(
 		.set("Referer", "https://$domain/")
 		.build()
 
-	private suspend fun loadSiteDocument(url: String): Document {
-		when (val result = tryHttpDocument(url)) {
-			is HttpDocumentResult.Success -> return result.document
-			HttpDocumentResult.SecondaryVerification,
-			HttpDocumentResult.CloudflareChallenge,
-			HttpDocumentResult.Failed,
-			null -> {
-				context.requestBrowserAction(this, url)
-				throw ParseException("Interactive action is required to load page", url)
-			}
-		}
-	}
+	private suspend fun loadSiteDocument(url: String): Document =
+		webClient.httpGet(url, extraHeaders = siteHeaders()).parseHtml()
 
-	private suspend fun tryHttpDocument(url: String): HttpDocumentResult? {
-		val response = runCatching { webClient.httpGet(url, extraHeaders = siteHeaders()) }.getOrNull() ?: return null
-		return response.use { res ->
-			val doc = runCatching { res.parseHtml() }.getOrNull() ?: return HttpDocumentResult.Failed
-			if (hasValidUzayContent(doc)) {
-				return HttpDocumentResult.Success(doc)
-			}
-			if (isShieldVerificationPage(doc)) {
-				return HttpDocumentResult.SecondaryVerification
-			}
-			HttpDocumentResult.CloudflareChallenge
-		}
-	}
-
-	private suspend fun fetchApiRaw(url: String): String {
-		val raw = runCatching {
-			webClient.httpGet(url = url, extraHeaders = siteHeaders()).parseRaw()
-		}.getOrNull()
-		if (!raw.isNullOrBlank() && !isShieldVerificationPage(raw) && !isCloudflareChallengePage(raw)) {
-			return raw
-		}
-		loadSiteDocument("https://$domain/search")
-		return webClient.httpGet(url = url, extraHeaders = siteHeaders()).parseRaw()
-	}
-
-	private fun isShieldVerificationPage(doc: Document): Boolean = isShieldVerificationPage(doc.outerHtml())
-
-	private fun isShieldVerificationPage(html: String): Boolean {
-		val lower = html.lowercase(Locale.ROOT)
-		return lower.contains("verification complete") ||
-			lower.contains("protected by waf security shield") ||
-			lower.contains("access granted!") ||
-			lower.contains("computing challenge") ||
-			lower.contains("solving proof of work") ||
-			lower.contains("""id="container"""") && lower.contains("verified")
-	}
-
-	private fun isCloudflareChallengePage(doc: Document): Boolean {
-		if (hasValidUzayContent(doc)) {
-			return false
-		}
-		val title = doc.title().lowercase(Locale.ROOT)
-		if (title.contains("access denied") || title.contains("just a moment")) return true
-		if (doc.selectFirst("form[action*=__cf_chl]") != null) return true
-		if (doc.getElementById("challenge-error-title") != null) return true
-		if (doc.getElementById("challenge-error-text") != null) return true
-		return isCloudflareChallengePage(doc.outerHtml())
-	}
-
-	private fun isCloudflareChallengePage(html: String): Boolean {
-		val lower = html.lowercase(Locale.ROOT)
-		return lower.contains("<title>access denied") ||
-			lower.contains("<title>just a moment") ||
-			isClassicCloudflareChallenge(lower) ||
-			(lower.contains("/cdn-cgi/challenge-platform/") &&
-				(lower.contains("enable javascript and cookies to continue") ||
-					lower.contains("window._cf_chl_opt"))) ||
-			lower.contains("form action=\"/cdn-cgi/challenge-platform/") ||
-			lower.contains("form action=\"/cdn-cgi/l/chk_captcha")
-	}
-
-	private fun isClassicCloudflareChallenge(lower: String): Boolean {
-		return (lower.contains("just a moment") && lower.contains("cloudflare")) ||
-			(lower.contains("checking your browser") && lower.contains("cloudflare")) ||
-			lower.contains("cf-browser-verification") ||
-			lower.contains("cf-chl-opt")
-	}
-
-	private fun hasValidUzayContent(doc: Document): Boolean {
-		val hasDirectoryCards = extractDirectoryCards(doc).isNotEmpty()
-		val hasLatestCards = doc.select("div.header:has(h2:contains(En Son Yüklenen)) + div a[href*='/manga/'] h2").isNotEmpty() ||
-			doc.select("div.grid a[href*='/manga/'] h2").isNotEmpty()
-		return hasDirectoryCards ||
-			hasLatestCards ||
-			doc.select("div.list-episode a").isNotEmpty() ||
-			doc.select("#content h1").isNotEmpty() ||
-			doc.select("a[href*='search?categories=']").isNotEmpty()
-	}
+	private suspend fun fetchApiRaw(url: String): String =
+		webClient.httpGet(url = url, extraHeaders = siteHeaders()).parseRaw()
 
 	private companion object {
-		private sealed interface HttpDocumentResult {
-			data class Success(val document: Document) : HttpDocumentResult
-			data object CloudflareChallenge : HttpDocumentResult
-			data object SecondaryVerification : HttpDocumentResult
-			data object Failed : HttpDocumentResult
-		}
-
 		private const val URL_SEARCH_PREFIX = "slug:"
 		private val PAGE_REGEX = Regex("""\\"path\\":\\"([^"]+)\\""")
 		private val CHAPTER_NUMBER_REGEX = Regex("""(\d+(?:\.\d+)?)""")

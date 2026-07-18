@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers.site.iken
 import org.jsoup.nodes.Document
 import org.json.JSONObject
 import org.json.JSONArray
+import okhttp3.Headers
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
@@ -24,6 +25,14 @@ internal abstract class IkenParser(
 
 	protected val defaultDomain: String
 		get() = if (useAPI) "api.$domain" else domain
+
+	protected open val apiHeaders: Headers by lazy {
+		getRequestHeaders().newBuilder()
+			.set("Accept", "application/json, text/plain, */*")
+			.set("Origin", "https://$domain")
+			.set("Referer", "https://$domain/")
+			.build()
+	}
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -105,7 +114,10 @@ internal abstract class IkenParser(
 		return json.getJSONArray("posts").mapJSON {
 			val url = "/series/${it.getString("slug")}"
 			val isNsfwSource = it.getBooleanOrDefault("hot", false)
-			val author = it.getString("author")
+			val author = it.getStringOrNull("author")?.nullIfEmpty()
+			val description = it.getStringOrNull("postContent")
+				?: it.getStringOrNull("description")
+				?: ""
 			Manga(
 				id = it.getLong("id"),
 				url = url,
@@ -113,7 +125,7 @@ internal abstract class IkenParser(
 				coverUrl = it.getString("featuredImage"),
 				title = it.getString("postTitle"),
 				altTitles = setOfNotNull(it.getStringOrNull("alternativeTitles")),
-				description = it.getString("postContent"),
+				description = description,
 				rating = RATING_UNKNOWN,
 				tags = emptySet(),
 				authors = setOfNotNull(author),
@@ -166,6 +178,18 @@ internal abstract class IkenParser(
 	protected open val selectPages = "main section img"
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+		if (useAPI) {
+			val apiPages = runCatching { readChapterImages(chapter.id) }.getOrElse { error ->
+				if (error.message?.contains("unlock", ignoreCase = true) == true) {
+					throw error
+				}
+				emptyList()
+			}
+			if (apiPages.isNotEmpty()) {
+				return apiPages
+			}
+		}
+
 		val fullUrl = chapter.url.toAbsoluteUrl(domain)
 		val doc = webClient.httpGet(fullUrl).parseHtml()
 
@@ -180,6 +204,39 @@ internal abstract class IkenParser(
 			MangaPage(
 				id = generateUid(p),
 				url = p,
+				preview = null,
+				source = source,
+			)
+		}
+	}
+
+	protected open suspend fun readChapterImages(chapterId: Long): List<MangaPage> {
+		if (chapterId <= 0L) return emptyList()
+		val json = webClient.httpGet(
+			"https://$defaultDomain/api/chapter?chapterId=$chapterId",
+			apiHeaders,
+		).parseJson()
+		val chapterJson = json.optJSONObject("chapter") ?: return emptyList()
+		if (chapterJson.optBoolean("isLocked", false) || chapterJson.opt("isAccessible") == false) {
+			throw Exception("Need to unlock chapter!")
+		}
+		val images = chapterJson.optJSONArray("images") ?: return emptyList()
+		val pages = (0 until images.length()).mapNotNull { index ->
+			val item = images.optJSONObject(index) ?: return@mapNotNull null
+			val url = item.getStringOrNull("url")
+				?: item.getStringOrNull("src")
+				?: item.getStringOrNull("image")
+				?: return@mapNotNull null
+			PageImage(
+				order = item.opt("order")?.toString()?.toIntOrNull() ?: Int.MAX_VALUE,
+				url = url.replace("/public//", "/public/"),
+			)
+		}.sortedBy { it.order }
+
+		return pages.map { image ->
+			MangaPage(
+				id = generateUid(image.url),
+				url = image.url,
 				preview = null,
 				source = source,
 			)
@@ -245,4 +302,9 @@ internal abstract class IkenParser(
 			item.getString("url")
 		}
 	}
+
+	private data class PageImage(
+		val order: Int,
+		val url: String,
+	)
 }

@@ -51,7 +51,11 @@ internal class DilarTube(context: MangaLoaderContext) :
         val url = "https://dilar.tube/api/search/quick_search"
         val jsonBody = JSONObject().apply {
             put("query", filter.query)
-            put("includes", JSONArray())
+            put("includes", JSONArray().apply {
+                put("Manga")
+                put("Team")
+                put("Member")
+            })
         }
 
         val response = webClient.httpPost(url.toHttpUrl(), jsonBody).parseJsonArray()

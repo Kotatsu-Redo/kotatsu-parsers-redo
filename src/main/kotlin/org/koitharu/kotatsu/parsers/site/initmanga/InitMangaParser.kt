@@ -44,6 +44,7 @@ import org.koitharu.kotatsu.parsers.util.toRelativeUrl
 import org.koitharu.kotatsu.parsers.util.toTitleCase
 import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.EnumSet
 import java.util.Locale
 import javax.crypto.Cipher
@@ -272,7 +273,7 @@ internal abstract class InitMangaParser(
 				"${mangaUrl.toAbsoluteUrl(domain).trimEnd('/')}/bolum/page/$page/"
 			}
 			val doc = webClient.httpGet(url).parseHtml()
-			val items = doc.select("div.chapter-item")
+			val items = doc.selectChapterItems(mangaUrl)
 			if (items.isEmpty()) {
 				break
 			}
@@ -298,10 +299,43 @@ internal abstract class InitMangaParser(
 		)
 	}
 
+	protected open val selectChapterItems = "div.chapter-item, div#chapters-list > a[href], #chapters-list > li > a[href]"
+
+	private fun Document.selectChapterItems(mangaUrl: String): List<Element> {
+		val items = select(selectChapterItems)
+		if (items.isNotEmpty()) {
+			return items
+		}
+
+		val mangaPath = mangaUrl.toAbsoluteUrl(domain)
+			.toHttpUrlOrNull()
+			?.encodedPath
+			?.trimEnd('/')
+			?: return emptyList()
+		return select("a[href]").filter { anchor ->
+			val chapterPath = anchor.attrAsAbsoluteUrlOrNull("href")
+				?.toHttpUrlOrNull()
+				?.encodedPath
+				?.trimEnd('/')
+				?: return@filter false
+			if (!chapterPath.startsWith("$mangaPath/")) return@filter false
+
+			val chapterSlug = chapterPath.removePrefix(mangaPath).trim('/')
+			chapterSlug.isNotEmpty() &&
+				!chapterSlug.startsWith("bolum/page/") &&
+				CHAPTER_NUMBER_REGEX.containsMatchIn(chapterSlug)
+		}.distinctBy { anchor ->
+			anchor.attrAsRelativeUrlOrNull("href") ?: anchor.attr("href")
+		}
+	}
+
 	private fun parseChapter(element: Element): MangaChapter? {
-		val a = element.selectFirst("a[href]") ?: return null
+		val a = element.takeIf { it.tagName() == "a" && it.hasAttr("href") }
+			?: element.selectFirst("a[href]")
+			?: return null
 		val chapterUrl = a.attrAsRelativeUrlOrNull("href") ?: return null
 		val rawTitle = element.selectFirst("h3, h4")?.textOrNull()
+			?: a.selectFirst("div.gap-2, #item-title, .chapter-title, h3, h4")?.textOrNull()
 			?: a.attr("title").trim().nullIfEmpty()
 			?: element.selectFirst("img[alt]")?.attr("alt")?.trim()?.nullIfEmpty()
 			?: a.text().trim().nullIfEmpty()
@@ -325,12 +359,41 @@ internal abstract class InitMangaParser(
 			?.substringAfter("title:")
 			?.substringBefore(';')
 			?.trim()
+		val textDate = element.selectFirst("div.gap-3 span, div:has( #item-title) span.mt-1, .chapter-date")
+			?.textOrNull()
 
 		return chapterIsoDateFormat.parseSafe(dateTime)
 			.takeIf { it != 0L }
 			?: chapterTooltipDateFormat.parseSafe(tooltip)
 			.takeIf { it != 0L }
 			?: fallbackEnglishDateFormat.parseSafe(tooltip)
+			.takeIf { it != 0L }
+			?: parseRelativeChapterDate(textDate)
+	}
+
+	private fun parseRelativeChapterDate(date: String?): Long {
+		val text = date?.trim()?.lowercase(sourceLocale) ?: return 0L
+		val amount = Regex("""\d+""").find(text)?.value?.toIntOrNull()
+		if (amount == null) {
+			return when {
+				text.startsWith("yesterday") || text.startsWith("dün") -> Calendar.getInstance().apply {
+					add(Calendar.DAY_OF_MONTH, -1)
+				}.timeInMillis
+				text.startsWith("today") || text.startsWith("bugün") -> System.currentTimeMillis()
+				else -> 0L
+			}
+		}
+		return Calendar.getInstance().apply {
+			when {
+				"dakika" in text || "minute" in text || "min" in text -> add(Calendar.MINUTE, -amount)
+				"saat" in text || "hour" in text -> add(Calendar.HOUR_OF_DAY, -amount)
+				"gün" in text || "day" in text -> add(Calendar.DAY_OF_MONTH, -amount)
+				"hafta" in text || "week" in text -> add(Calendar.WEEK_OF_YEAR, -amount)
+				"ay" in text || "month" in text -> add(Calendar.MONTH, -amount)
+				"yıl" in text || "year" in text -> add(Calendar.YEAR, -amount)
+				else -> return 0L
+			}
+		}.timeInMillis
 	}
 
 	private fun parseTag(anchor: Element): MangaTag {

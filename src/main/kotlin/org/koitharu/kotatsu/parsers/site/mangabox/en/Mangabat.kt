@@ -2,6 +2,8 @@ package org.koitharu.kotatsu.parsers.site.mangabox.en
 
 import okhttp3.Interceptor
 import okhttp3.Response
+import org.jsoup.nodes.Document
+import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -16,6 +18,7 @@ import org.koitharu.kotatsu.parsers.model.search.SearchableField
 import org.koitharu.kotatsu.parsers.model.search.SearchableField.*
 import org.koitharu.kotatsu.parsers.site.mangabox.MangaboxParser
 import org.koitharu.kotatsu.parsers.util.*
+import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.collections.set
 
@@ -153,6 +156,94 @@ internal class Mangabat(context: MangaLoaderContext) :
 		return uniqueTags
 	}
 
+	override suspend fun getChapters(doc: Document): List<MangaChapter> {
+		val slug = doc.location()
+			.substringAfter("/manga/", "")
+			.substringBefore("/")
+			.trim()
+			.ifEmpty { return super.getChapters(doc) }
+
+		val chapters = runCatching {
+			fetchChaptersApi(slug)
+		}.getOrElse {
+			emptyList()
+		}
+
+		return if (chapters.isNotEmpty()) {
+			chapters
+		} else {
+			super.getChapters(doc)
+		}
+	}
+
+	private suspend fun fetchChaptersApi(slug: String): List<MangaChapter> {
+		val rawChapters = ArrayList<JSONObject>()
+		var offset = 0
+
+		while (true) {
+			val apiUrl = "https://$domain/api/manga/$slug/chapters?limit=$CHAPTER_LIST_TAKE&offset=$offset"
+			val json = webClient.httpGet(apiUrl).parseJson()
+			val data = json.optJSONObject("data") ?: break
+			val chapters = data.optJSONArray("chapters") ?: break
+
+			for (i in 0 until chapters.length()) {
+				chapters.optJSONObject(i)?.let(rawChapters::add)
+			}
+
+			val hasMore = data.optJSONObject("pagination")?.optBoolean("has_more", false) == true
+			if (!hasMore) {
+				break
+			}
+			offset += CHAPTER_LIST_TAKE
+		}
+
+		return rawChapters.mapNotNull { chapter ->
+			val chapterSlug = chapter.optString("chapter_slug").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+			val chapterName = chapter.optString("chapter_name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+			val chapterNumber = chapter.optString("chapter_num").toFloatOrNull()
+				?: chapter.optDouble("chapter_num", Double.NaN).takeUnless(Double::isNaN)?.toFloat()
+				?: 0f
+
+			val url = "/manga/$slug/$chapterSlug"
+
+			MangaChapter(
+				id = generateUid(url),
+				title = chapterName,
+				number = chapterNumber,
+				volume = 0,
+				url = url,
+				uploadDate = parseApiDate(chapter.optString("updated_at")),
+				source = source,
+				scanlator = null,
+				branch = null,
+			)
+		}.sortedBy { it.number }
+	}
+
+	private fun parseApiDate(date: String?): Long {
+		if (date.isNullOrBlank()) {
+			return 0L
+		}
+
+		val formats = listOf(
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'", Locale.US),
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US),
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US),
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US),
+		).onEach {
+			it.timeZone = TimeZone.getTimeZone("UTC")
+		}
+
+		for (format in formats) {
+			val parsed = format.parseSafe(date)
+			if (parsed != 0L) {
+				return parsed
+			}
+		}
+
+		return 0L
+	}
+
     override fun getRequestHeaders() = super.getRequestHeaders().newBuilder()
         .set("Referer", "https://www.mangabats.com/")
         .build()
@@ -172,4 +263,7 @@ internal class Mangabat(context: MangaLoaderContext) :
         return chain.proceed(originalRequest)
     }
 
+	companion object {
+		private const val CHAPTER_LIST_TAKE = 1000
+	}
 }

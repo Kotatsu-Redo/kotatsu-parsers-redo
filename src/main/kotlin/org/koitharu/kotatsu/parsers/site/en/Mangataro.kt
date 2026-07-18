@@ -255,7 +255,16 @@ internal class Mangataro(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val document = fetchDocument(chapter.url.toAbsoluteUrl(domain))
+		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
+		val chapterId = chapterUrl.extractChapterId()
+			?: fetchDocument(chapterUrl).body().attr("data-chapter-id").nullIfEmpty()
+		if (chapterId != null) {
+			val pages = loadChapterPages(chapterId, chapterUrl)
+			if (pages.isNotEmpty()) {
+				return pages
+			}
+		}
+		val document = fetchDocument(chapterUrl)
 		val containers = document.select("div.comic-image-container img")
 		val seen = HashSet<String>(containers.size)
 		return containers.mapNotNull { element ->
@@ -265,6 +274,35 @@ internal class Mangataro(context: MangaLoaderContext) :
 			if (!seen.add(imageUrl)) {
 				return@mapNotNull null
 			}
+			MangaPage(
+				id = generateUid(imageUrl),
+				url = imageUrl,
+				preview = null,
+				source = source,
+			)
+		}
+	}
+
+	private suspend fun loadChapterPages(chapterId: String, referer: String): List<MangaPage> {
+		val headers = Headers.headersOf(
+			"Accept",
+			"application/json",
+			"Referer",
+			referer,
+		)
+		val raw = webClient.httpGet("https://$domain/auth/chapter-content?chapter_id=$chapterId", headers)
+			.parseRaw()
+			.trim()
+		if (raw.isEmpty()) {
+			return emptyList()
+		}
+		val json = raw.toJsonObjectOrNull() ?: return emptyList()
+		if (!json.optBoolean("success", false) || json.optString("chapter_type") == "text") {
+			return emptyList()
+		}
+		val images = json.optJSONArray("images") ?: return emptyList()
+		return List(images.length()) { index ->
+			val imageUrl = images.getString(index)
 			MangaPage(
 				id = generateUid(imageUrl),
 				url = imageUrl,
@@ -550,6 +588,12 @@ internal class Mangataro(context: MangaLoaderContext) :
 	}
 
 	private fun String.urlWithoutFragment(): String = substringBefore('#')
+
+	private fun String.extractChapterId(): String? = substringBefore('#')
+		.substringBefore('?')
+		.substringAfterLast('-')
+		.takeIf { it.all(Char::isDigit) }
+		?.nullIfEmpty()
 
 	private suspend fun postJsonArray(url: String, payload: JSONObject): JSONArray {
 		val raw = webClient.httpPost(url, payload).parseRaw().trim()

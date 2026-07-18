@@ -13,7 +13,7 @@ import org.koitharu.kotatsu.parsers.util.selectFirstOrThrow
 
 @MangaSourceParser("ULASCOMIC", "UlasComic", "id")
 internal class UlasComic(context: MangaLoaderContext):
-	ZeistMangaParser(context, MangaParserSource.ULASCOMIC, "www.ulascomic00.xyz") {
+	ZeistMangaParser(context, MangaParserSource.ULASCOMIC, "www.ulascomic01.xyz") {
 	
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()

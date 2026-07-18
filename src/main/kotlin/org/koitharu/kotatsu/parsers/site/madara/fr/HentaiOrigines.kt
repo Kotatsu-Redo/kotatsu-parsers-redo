@@ -8,4 +8,4 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
 @MangaSourceParser("HENTAIORIGINES", "HentaiOrigines", "fr", ContentType.HENTAI)
 internal class HentaiOrigines(context: MangaLoaderContext) :
-	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.fr")
+	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.com")

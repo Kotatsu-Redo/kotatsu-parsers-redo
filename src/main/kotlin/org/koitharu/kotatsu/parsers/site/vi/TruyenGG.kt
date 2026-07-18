@@ -1,5 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.vi
 
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -12,7 +14,7 @@ import java.util.*
 @MangaSourceParser("TRUYENGG", "FoxTruyen", "vi")
 internal class TruyenGG(context: MangaLoaderContext) : PagedMangaParser(context, MangaParserSource.TRUYENGG, 42) {
 
-	override val configKeyDomain = ConfigKey.Domain("foxtruyen.com")
+	override val configKeyDomain = ConfigKey.Domain("foxtruyen2.com")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.NEWEST,
@@ -151,17 +153,17 @@ internal class TruyenGG(context: MangaLoaderContext) : PagedMangaParser(context,
 					source = source,
 				)
 			},
-			description = doc.select("div.story-detail-info").text(),
+			description = parseDescription(doc),
 			state = when (doc.select("p:contains(Trạng Thái) + p").text()) {
 				"Đang Cập Nhật" -> MangaState.ONGOING
 				"Hoàn Thành" -> MangaState.FINISHED
 				else -> null
 			},
-			chapters = doc.select("ul.list_chap > li.item_chap").mapChapters(reversed = true) { i, div ->
-				val a = div.selectFirstOrThrow("a")
+			chapters = selectChapterItems(doc).mapChapters(reversed = true) { i, div ->
+				val a = div.selectFirst("a.fx-chap-item__name") ?: div.selectFirstOrThrow("a")
 				val href = a.attrAsRelativeUrl("href")
 				val name = a.text()
-				val dateText = div.select("span.cl99").text()
+				val dateText = div.selectFirst(".fx-chap-item__date")?.text() ?: div.select("span.cl99").text()
 				MangaChapter(
 					id = generateUid(href),
 					title = name,
@@ -175,6 +177,19 @@ internal class TruyenGG(context: MangaLoaderContext) : PagedMangaParser(context,
 				)
 			},
 		)
+	}
+
+	private fun parseDescription(doc: Document): String? {
+		return doc.select("div.fx-synopsis__text > p")
+			.joinToString("<br>") { it.html() }
+			.nullIfEmpty()
+			?: doc.selectFirst("div.fx-synopsis__text")?.html()
+			?: doc.select("div.story-detail-info").textOrNull()
+	}
+
+	private fun selectChapterItems(doc: Document): List<Element> {
+		return doc.select("ul.fx-chap-list > li.fx-chap-item").takeUnless { it.isEmpty() }
+			?: doc.select("ul.list_chap > li.item_chap")
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {

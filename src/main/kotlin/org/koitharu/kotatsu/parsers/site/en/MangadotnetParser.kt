@@ -325,43 +325,69 @@ internal class Mangadotnet(context: MangaLoaderContext) :
 	private suspend fun fetchChapters(mangaId: String): List<MangaChapter> {
 		val response = webClient.httpGet("$baseUrl/api/manga/$mangaId/chapters/list?lang=en").parseJsonArray()
 
-		val chapters = (0 until response.length()).map { i ->
-			val ch = response.getJSONObject(i)
-			val chapterId = ch.getString("id")
-			val chapterSource = ch.optString("source", "scraper")
-			val number = ch.optDouble("chapter_number", 0.0).toFloat()
-			val name = ch.optString("chapter_title", "").nullIfEmpty()
-			val group = ch.optString("group_name", "").nullIfEmpty()
-			val scanlator = ch.optString("scanlator_name", "").nullIfEmpty()
-			val date = ch.optString("date_added", "").nullIfEmpty()
-
-			val title = buildString {
-				val numStr = number.toString().substringBefore(".0")
-				if (name != null && !name.contains(numStr)) {
-					append("Chapter $numStr: ")
-				} else if (name == null) {
-					append("Chapter $numStr")
-				}
-				name?.let { append(it.trim()) }
-			}
-
-			MangaChapter(
-				id = generateUid(chapterId),
-				title = title,
-				number = number,
-				volume = 0,
-				url = JSONObject().apply {
-					put("id", chapterId)
-					put("source", chapterSource)
-				}.toString(),
-				uploadDate = date?.let { dateFormat.parseSafe(it) } ?: 0L,
-				source = source,
-				scanlator = group ?: scanlator,
-				branch = null,
-			)
+		val allChapters = (0 until response.length()).map { i ->
+			response.getJSONObject(i)
 		}
 
-		return chapters.reversed()
+		val chaptersByTeam = mutableMapOf<String, MutableList<JSONObject>>()
+		for (chapter in allChapters) {
+			val group = chapter.optString("group_name", "").nullIfEmpty()
+			val scanlator = chapter.optString("scanlator_name", "").nullIfEmpty()
+			val teamName = group ?: scanlator ?: "Unknown"
+			chaptersByTeam.getOrPut(teamName) { mutableListOf() }.add(chapter)
+		}
+
+		val allChapterNumbers = allChapters.map { it.optDouble("chapter_number", 0.0).toFloat() }.toSet().sorted()
+
+		val chaptersBuilder = ChaptersListBuilder(allChapters.size * chaptersByTeam.size)
+
+		for ((teamName, teamChapters) in chaptersByTeam) {
+			val teamChapterMap = teamChapters.associateBy { it.optDouble("chapter_number", 0.0).toFloat() }
+
+			for (chapterNumber in allChapterNumbers) {
+				val chapterData = teamChapterMap[chapterNumber]
+					?: allChapters.find { it.optDouble("chapter_number", 0.0).toFloat() == chapterNumber }
+					?: continue
+
+				val chapterId = chapterData.getString("id")
+				val chapterSource = chapterData.optString("source", "scraper")
+				val number = chapterData.optDouble("chapter_number", 0.0).toFloat()
+				val name = chapterData.optString("chapter_title", "").nullIfEmpty()
+				val group = chapterData.optString("group_name", "").nullIfEmpty()
+				val scanlator = chapterData.optString("scanlator_name", "").nullIfEmpty()
+				val actualTeamName = group ?: scanlator ?: "Unknown"
+				val date = chapterData.optString("date_added", "").nullIfEmpty()
+
+				val title = buildString {
+					val numStr = number.toString().substringBefore(".0")
+					if (name != null && !name.contains(numStr)) {
+						append("Chapter $numStr: ")
+					} else if (name == null) {
+						append("Chapter $numStr")
+					}
+					name?.let { append(it.trim()) }
+				}
+
+				val chapter = MangaChapter(
+					id = generateUid("$teamName-$chapterId"),
+					title = title,
+					number = number,
+					volume = 0,
+					url = JSONObject().apply {
+						put("id", chapterId)
+						put("source", chapterSource)
+					}.toString(),
+					uploadDate = date?.let { dateFormat.parseSafe(it) } ?: 0L,
+					source = source,
+					scanlator = actualTeamName,
+					branch = teamName,
+				)
+
+				chaptersBuilder.add(chapter)
+			}
+		}
+
+		return chaptersBuilder.toList()
 	}
 
 	// endregion

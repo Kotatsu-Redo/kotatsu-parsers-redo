@@ -12,6 +12,7 @@ import org.koitharu.kotatsu.parsers.network.CloudFlareHelper
 import org.koitharu.kotatsu.parsers.network.CommonHeaders
 import java.util.*
 
+@Broken
 @MangaSourceParser("MGKOMIK", "MgKomik", "id")
 internal class Mgkomik(context: MangaLoaderContext) :
     MadaraParser(context, MangaParserSource.MGKOMIK, "id.mgkomik.cc", 20) {

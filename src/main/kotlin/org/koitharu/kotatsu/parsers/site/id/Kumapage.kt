@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.id
 
+import org.koitharu.kotatsu.parsers.Broken
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
@@ -14,6 +15,7 @@ import java.util.*
 
 // TODO: Check if manga is NSFW by checking the genre
 
+@Broken
 @MangaSourceParser("KUMAPAGE", "Kumapage", "id")
 internal class Kumapage(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.KUMAPAGE, 14) {

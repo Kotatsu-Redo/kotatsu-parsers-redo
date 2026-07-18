@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.madara.en
 
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
+import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
@@ -9,4 +10,8 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 internal class AnisaScans(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ANISASCANS, "anisascans.in", 36) {
 	override val datePattern = "dd MMM, yyyy"
+    override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+        super.onCreateConfig(keys)
+        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+    }
 }

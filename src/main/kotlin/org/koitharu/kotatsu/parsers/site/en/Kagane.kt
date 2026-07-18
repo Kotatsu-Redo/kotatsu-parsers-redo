@@ -1,25 +1,22 @@
 package org.koitharu.kotatsu.parsers.site.all
 
 import okhttp3.Interceptor
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Protocol
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.HttpStatusException
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
-import org.koitharu.kotatsu.parsers.webview.InterceptedRequest
-import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
 import java.math.BigInteger
 import java.net.URI
-import java.net.URLDecoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -35,8 +32,8 @@ import javax.crypto.spec.SecretKeySpec
 internal class Kagane(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KAGANE, pageSize = 35) {
 
-    override val configKeyDomain = ConfigKey.Domain("kagane.org")
-    private val apiUrl = "https://yuzuki.kagane.org"
+    override val configKeyDomain = ConfigKey.Domain("kagane.to")
+    private val apiUrl = "https://yuzuki.kagane.to"
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
@@ -44,6 +41,11 @@ internal class Kagane(context: MangaLoaderContext) :
         SortOrder.NEWEST,
         SortOrder.ALPHABETICAL
     )
+
+    override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+        super.onCreateConfig(keys)
+        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
+    }
 
     override val filterCapabilities: MangaListFilterCapabilities
         get() = MangaListFilterCapabilities(
@@ -56,6 +58,51 @@ internal class Kagane(context: MangaLoaderContext) :
     private val UUID_REGEX = Regex(
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
     )
+
+    private companion object {
+        val KAGANE_LANGS = arrayOf(
+            "en",
+            "ja",
+            "ko",
+            "zh-Hans",
+            "zh-Hant",
+            "es",
+            "es-419",
+            "fr",
+            "de",
+            "pt",
+            "pt-BR",
+            "ru",
+            "it",
+            "id",
+            "vi",
+            "th",
+            "pl",
+            "hi",
+            "ar",
+        )
+    }
+
+    // ---- Debug logging (grep logcat for "KAGANE_DBG") ----
+    private fun dbg(msg: String) = println("KAGANE_DBG: $msg")
+
+    private fun ByteArray.headHex(n: Int = 16): String =
+        take(n).joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }
+
+    private fun signedMessageType(bytes: ByteArray): String {
+        // Widevine SignedMessage: field 1 (tag 0x08) = type varint
+        if (bytes.size >= 2 && bytes[0].toInt() == 0x08) {
+            return when (bytes[1].toInt() and 0xFF) {
+                1 -> "LICENSE_REQUEST(1)"
+                2 -> "LICENSE(2)"
+                3 -> "ERROR_RESPONSE(3)"
+                4 -> "SERVICE_CERTIFICATE_REQUEST(4)"
+                5 -> "SERVICE_CERTIFICATE(5)"
+                else -> "type=${bytes[1].toInt() and 0xFF}"
+            }
+        }
+        return "unknown(${bytes.headHex(4)})"
+    }
 
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val genres = genresCache ?: fetchGenres().also { genresCache = it }
@@ -123,6 +170,14 @@ internal class Kagane(context: MangaLoaderContext) :
         if (!filter.query.isNullOrEmpty()) {
             jsonBody.put("title", filter.query)
         }
+        jsonBody.put("source_type", JSONArray().apply {
+            put("Official")
+            put("Unofficial")
+            put("Mixed")
+        })
+        jsonBody.put("content_lang", JSONArray().apply {
+            KAGANE_LANGS.forEach(::put)
+        })
 
         val genreIds = filter.tags.map { it.key }.filter { UUID_REGEX.matches(it) }
         if (genreIds.isNotEmpty()) {
@@ -133,25 +188,46 @@ internal class Kagane(context: MangaLoaderContext) :
             genresObj.put("match_all", false)
             jsonBody.put("genres", genresObj)
         }
-
-        val requestBody = jsonBody.toString().toRequestBody("application/json".toMediaType())
+        if (filter.tagsExclude.isNotEmpty()) {
+            val excludedGenreIds = filter.tagsExclude.map { it.key }.filter { UUID_REGEX.matches(it) }
+            if (excludedGenreIds.isNotEmpty()) {
+                val genresObj = jsonBody.optJSONObject("genres") ?: JSONObject().also {
+                    jsonBody.put("genres", it)
+                }
+                genresObj.put("exclude", JSONArray().apply {
+                    excludedGenreIds.forEach(::put)
+                })
+            }
+        }
+        jsonBody.put("content_rating", JSONArray().apply {
+            val ratings = filter.contentRating.ifEmpty {
+                EnumSet.of(ContentRating.SAFE, ContentRating.SUGGESTIVE, ContentRating.ADULT)
+            }
+            if (ContentRating.SAFE in ratings) put("Safe")
+            if (ContentRating.SUGGESTIVE in ratings) put("Suggestive")
+            if (ContentRating.ADULT in ratings) {
+                put("Erotica")
+                put("Pornographic")
+            }
+        })
 
         val headers = getRequestHeaders().newBuilder()
             .add("Origin", "https://$domain")
             .add("Referer", "https://$domain/")
             .build()
 
-        val responseObj = context.httpClient.newCall(
-            Request.Builder()
-                .url(url)
-                .post(requestBody)
-                .headers(headers)
-                .build()
-        ).await()
+        val responseBody = try {
+            webClient.httpPost(url.toHttpUrl(), jsonBody, headers).parseRaw()
+        } catch (e: HttpStatusException) {
+            if (e.statusCode == 403) {
+                requestCloudflareVerification(url, e)
+            } else {
+                throw e
+            }
+        }
 
-        val responseBody = responseObj.body?.string() ?: ""
-        if (!responseObj.isSuccessful) {
-            throw Exception("Search error ${responseObj.code}: $responseBody")
+        if (responseBody.isCloudflareChallenge()) {
+            requestCloudflareVerification(url)
         }
 
         val response = try {
@@ -173,7 +249,7 @@ internal class Kagane(context: MangaLoaderContext) :
             val title = if (src.isNotEmpty()) "$name [$src]" else name
             val coverImageId = item.optString("cover_image_id").ifBlank { item.optString("coverImageId") }
             val coverUrl = if (coverImageId.isNotBlank()) {
-                "$apiUrl/api/v2/image/$coverImageId/compressed"
+                "$apiUrl/api/v2/image/$coverImageId"
             } else {
                 "$apiUrl/api/v2/series/$id/thumbnail"
             }
@@ -220,7 +296,7 @@ internal class Kagane(context: MangaLoaderContext) :
             "ONGOING" -> MangaState.ONGOING
             "COMPLETED", "ENDED" -> MangaState.FINISHED
             "HIATUS" -> MangaState.PAUSED
-            "CANCELLED", "CANCELED", "DROPPED" -> MangaState.ABANDONED
+            "ABANDONED", "CANCELLED", "CANCELED", "DROPPED" -> MangaState.ABANDONED
             else -> null
         }
 
@@ -268,14 +344,52 @@ internal class Kagane(context: MangaLoaderContext) :
                 for (i in 0 until arr.length()) {
                     val staff = arr.optJSONObject(i) ?: continue
                     val role = staff.optString("role")
-                    if (role.equals("author", ignoreCase = true) || role.equals("artist", ignoreCase = true)) {
+                    if (
+                        role.contains("author", ignoreCase = true) ||
+                        role.contains("story", ignoreCase = true) ||
+                        role.contains("artist", ignoreCase = true) ||
+                        role.contains("art", ignoreCase = true)
+                    ) {
                         staff.optString("name").takeIf { it.isNotBlank() }?.let(authors::add)
                     }
                 }
             }
         }
 
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
+        val altTitles = json.optJSONArray("series_alternate_titles")?.let { arr ->
+            buildSet {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    item.optString("title").takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }
+        } ?: emptySet()
+
+        val description = buildString {
+            json.optString("description")
+                .ifBlank { json.optString("summary") }
+                .takeIf { it.isNotBlank() }
+                ?.let {
+                    append(it.trim())
+                }
+            if (altTitles.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append("Associated Name(s):\n")
+                altTitles.forEach {
+                    append(it)
+                    append('\n')
+                }
+            }
+        }.trim().ifBlank { null }
+
+        val coverUrl = json.optJSONArray("series_covers")
+            ?.optJSONObject(0)
+            ?.optString("image_id")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "$apiUrl/api/v2/image/$it" }
+            ?: manga.coverUrl
+
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH)
         fun parseChapters(content: JSONArray): List<MangaChapter> {
             val chapters = ArrayList<MangaChapter>(content.length())
             for (i in 0 until content.length()) {
@@ -285,35 +399,54 @@ internal class Kagane(context: MangaLoaderContext) :
                     .ifBlank { ch.optString("bookId") }
                 if (chId.isBlank()) continue
                 val chapterNo = ch.optString("chapter_no")
-                val number = ch.optDouble("sort_no", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
+                val chapterNumber = chapterNo.toChapterNumberOrNull()
+                    ?: ch.optDouble("number", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
+                val sortNumber = ch.optDouble("sort_no", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
                     ?: ch.optDouble("number_sort", ch.optDouble("numberSort", Double.NaN)).takeIf { !it.isNaN() }?.toFloat()
-                    ?: chapterNo.toFloatOrNull()
-                    ?: ch.optDouble("number", 0.0).toFloat()
-                val chTitle = ch.optString("title")
-                    .ifBlank { ch.optString("name") }
-                    .ifBlank { chapterNo.takeIf { it.isNotBlank() }?.let { "Chapter $it" }.orEmpty() }
-                    .ifBlank { "Chapter $number" }
-                val pageCount = ch.optInt("page_count", ch.optInt("pages_count", ch.optInt("pagesCount", 0)))
+                val number = when {
+                    sortNumber != null && chapterNumber != null && sortNumber >= chapterNumber -> sortNumber
+                    sortNumber != null && chapterNumber == null -> sortNumber
+                    chapterNumber != null -> chapterNumber
+                    else -> 0f
+                }
+                val rawTitle = ch.optString("title").ifBlank { ch.optString("name") }.trim()
+                val chTitle = rawTitle.ifBlank {
+                    chapterNo.takeIf { it.isNotBlank() }?.let { "Ch.$it" }.orEmpty()
+                }.ifBlank { "Chapter $number" }
+                val volume = ch.optString("volume_no")
+                    .ifBlank { ch.optString("volume") }
+                    .toIntOrNull() ?: 0
                 val dateStr = ch.optString("published_on")
                     .ifBlank { ch.optString("release_date") }
                     .ifBlank { ch.optString("releaseDate") }
                     .ifBlank { ch.optString("created_at") }
-                    .substringBefore('T')
+                val groups = ch.optJSONArray("groups")
                 chapters.add(
                     MangaChapter(
                         id = generateUid("$seriesId:$chId"),
                         title = chTitle,
                         number = number,
-                        volume = 0,
-                        url = "/series/$seriesId/$chId?pages=$pageCount",
-                        uploadDate = try { dateFormat.parse(dateStr)?.time ?: 0L } catch (_: Exception) { 0L },
+                        volume = volume,
+                        url = "/series/$seriesId/reader/$chId",
+                        uploadDate = dateFormat.parseSafe(dateStr),
                         source = source,
-                        scanlator = null,
+                        scanlator = groups?.let { arr ->
+                            buildList {
+                                for (j in 0 until arr.length()) {
+                                    arr.optJSONObject(j)?.optString("title")?.takeIf { it.isNotBlank() }?.let(::add)
+                                }
+                            }.joinToString().ifBlank { null }
+                        },
                         branch = null,
                     ),
                 )
             }
-            return chapters
+            return chapters.sortedWith(
+                compareBy<MangaChapter> { it.number <= 0f }
+                    .thenBy { it.number }
+                    .thenBy { it.volume }
+                    .thenBy { it.title.orEmpty() },
+            )
         }
 
         var chapters = parseChapters(
@@ -335,7 +468,10 @@ internal class Kagane(context: MangaLoaderContext) :
         }
 
         return manga.copy(
-            description = json.optString("description").ifBlank { json.optString("summary") }.ifBlank { null },
+            title = json.optString("title").ifBlank { manga.title },
+            altTitles = altTitles,
+            coverUrl = coverUrl,
+            description = description,
             state = state,
             authors = authors,
             tags = genres,
@@ -352,192 +488,35 @@ internal class Kagane(context: MangaLoaderContext) :
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val uri = URI(chapter.url)
         val pathParts = uri.path.split("/").filter { it.isNotEmpty() }
-        if (pathParts.size < 3) throw Exception("Invalid chapter URL format: ${chapter.url}")
+        if (pathParts.size < 4) throw Exception("Invalid chapter URL format: ${chapter.url}")
 
-        val seriesId = pathParts[1]
-        val chapterId = pathParts[2]
-        val query = uri.query ?: ""
-        val pageCount = query.split("&")
-            .find { it.startsWith("pages=") }
-            ?.substringAfter("=")
-            ?.toIntOrNull() ?: 0
-
-        // 1. Fetch certificate (Widevine)
-        val cert = getCertificate()
-
-        // 2. Generate PSSH
-        val pssh = getPssh(chapterId)
-
-        // 3. Construct JS
-        val script = """
-            (async function() {
-                try {
-                    const certBase64 = "$cert";
-                    const psshBase64 = "$pssh";
-                    const binaryString = atob(certBase64);
-                    const bytes = new Uint8Array(binaryString.length);
-                    for (var i = 0; i < binaryString.length; i++) {
-                        bytes[i] = binaryString.charCodeAt(i);
-                    }
-                    const serverCert = bytes.buffer;
-
-                    const config = [{
-                        initDataTypes: ["cenc"],
-                        audioCapabilities: [],
-                        videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
-                    }];
-
-                    let access;
-                    try {
-                        access = await navigator.requestMediaKeySystemAccess("com.widevine.alpha", config);
-                    } catch (e) {
-                        access = await navigator.requestMediaKeySystemAccess("com.widevine.alpha", config);
-                    }
-
-                    const mediaKeys = await access.createMediaKeys();
-                    await mediaKeys.setServerCertificate(serverCert);
-
-                    const session = mediaKeys.createSession();
-
-                    const psshBinary = atob(psshBase64);
-                    const psshBytes = new Uint8Array(psshBinary.length);
-                    for (var i = 0; i < psshBinary.length; i++) {
-                        psshBytes[i] = psshBinary.charCodeAt(i);
-                    }
-
-                    const promise = new Promise((resolve, reject) => {
-                        session.addEventListener("message", (event) => {
-                             resolve(event.message);
-                        });
-                        session.addEventListener("error", (err) => {
-                             reject(err);
-                        });
-                    });
-
-                    await session.generateRequest("cenc", psshBytes.buffer);
-                    const message = await promise;
-
-                    // Convert ArrayBuffer to Base64
-                    let binary = '';
-                    const bytesMsg = new Uint8Array(message);
-                    for (let i = 0; i < bytesMsg.byteLength; i++) {
-                        binary += String.fromCharCode(bytesMsg[i]);
-                    }
-                    const challenge = btoa(binary);
-
-                    // Return challenge
-                    window.location.href = "https://kotatsu.intercept/result?challenge=" + encodeURIComponent(challenge);
-
-                } catch (e) {
-                    window.location.href = "https://kotatsu.intercept/error?msg=" + encodeURIComponent(e.toString());
-                }
-            })();
-        """.trimIndent()
-
-        // 4. Intercept to get challenge
-        val config = InterceptionConfig(
-            timeoutMs = 15000,  // Reduced from 60s to 15s - DRM challenge usually comes in 5-10s
-            urlPattern = Regex("https://kotatsu\\.intercept/.*", RegexOption.IGNORE_CASE),
-            pageScript = script,
-            maxRequests = 1  // Stop immediately after capturing the challenge
-        )
-
-        val interceptUrl = "https://$domain/series/$seriesId/$chapterId"
-        val requests = context.interceptWebViewRequests(interceptUrl, config)
-
-        val resultRequest = requests.firstOrNull() ?: throw Exception("Failed to intercept DRM challenge")
-
-        if (resultRequest.url.contains("/error")) {
-            val errorMsg = resultRequest.getQueryParameter("msg") ?: "Unknown error"
-            throw Exception("DRM JS Error: $errorMsg")
+        val chapterId = pathParts.last()
+        val challenge = getChallengeResponse(chapterId)
+        accessToken = challenge.optString("access_token").ifBlank {
+            challenge.optString("accessToken")
+        }.ifBlank {
+            throw Exception("Invalid challenge response: missing access token")
+        }
+        cacheUrl = challenge.optString("cache_url").ifBlank {
+            challenge.optString("cacheUrl")
+        }.ifBlank {
+            throw Exception("Invalid challenge response: missing cache url")
         }
 
-        val challengeEncoded = resultRequest.getQueryParameter("challenge") ?: throw Exception("No challenge in interception")
-        val challenge = URLDecoder.decode(challengeEncoded, StandardCharsets.UTF_8.name())
+        val pages = parseManifestPages(challenge)
+        if (pages.isEmpty()) {
+            throw Exception("Invalid challenge response: missing pages manifest")
+        }
 
-        // 5. POST to API to get token
-        val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=false"
-        val jsonBody = JSONObject()
-        jsonBody.put("challenge", challenge)
-
-        val integrityToken = getIntegrityToken()
-        val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
-            .add("x-integrity-token", integrityToken)
-            .build()
-
-        val response = context.httpClient.newCall(
-            Request.Builder()
-                .url(challengeUrl)
-                .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                .headers(headers)
+        return pages.sortedBy { it.pageNumber }.map { page ->
+            val ext = page.ext?.takeIf { it.isNotBlank() } ?: "jxl"
+            val imageUrl = "$cacheUrl/api/v2/books/page".toHttpUrl().newBuilder()
+                .addPathSegment(chapterId)
+                .addPathSegment("${page.pageUuid}.$ext")
+                .addQueryParameter("token", accessToken)
+                .addQueryParameter("is_datasaver", "false")
                 .build()
-        ).await()
-
-        val responseBody = response.body?.string() ?: ""
-
-        if (!response.isSuccessful) {
-            throw Exception("Failed to get token: ${response.code} $responseBody")
-        }
-
-        val tokenResponse = try {
-            JSONObject(responseBody)
-        } catch (e: Exception) {
-            throw Exception("Invalid JSON token response: $responseBody")
-        }
-
-        val token = tokenResponse.optString("access_token").ifBlank {
-            tokenResponse.optString("accessToken")
-        }.ifBlank {
-            throw Exception("Invalid token response: missing access token")
-        }
-        val currentCacheUrl = tokenResponse.optString("cache_url").ifBlank {
-            tokenResponse.optString("cacheUrl")
-        }.ifBlank {
-            throw Exception("Invalid token response: missing cache url")
-        }
-
-        val pagesJson = tokenResponse.optJSONArray("pages")
-        if (pagesJson != null && pagesJson.length() > 0) {
-            return (0 until pagesJson.length()).mapNotNull { index ->
-                val pageEntry = pagesJson.opt(index)
-                val pageUuid = when (pageEntry) {
-                    is String -> pageEntry
-                    is JSONObject -> pageEntry.optString("pageUuid").ifBlank {
-                        pageEntry.optString("page_uuid")
-                    }
-                    else -> ""
-                }
-                if (pageUuid.isBlank()) return@mapNotNull null
-                val pageIndex = when (pageEntry) {
-                    is JSONObject -> pageEntry.optInt("pageNumber", pageEntry.optInt("page_number", index + 1))
-                    else -> index + 1
-                }
-                val imageUrl = "$currentCacheUrl/api/v2/books/file/$chapterId/$pageUuid?token=$token&is_datasaver=false&sid=$seriesId&index=$pageIndex"
-                MangaPage(
-                    id = generateUid(imageUrl),
-                    url = imageUrl,
-                    preview = null,
-                    source = source,
-                )
-            }
-        }
-
-        val mappingJson = tokenResponse.optJSONObject("page_mapping")
-        val mapping = mutableMapOf<Int, String>()
-        mappingJson?.keys()?.forEach { key ->
-            val idx = key.toIntOrNull()
-            if (idx != null) mapping[idx] = mappingJson.getString(key)
-        }
-        val totalPages = if (pageCount > 0) pageCount else mapping.size
-        if (totalPages <= 0) {
-            throw Exception("Unable to parse pages from token response")
-        }
-        return (0 until totalPages).map { index ->
-            val pageIndex = index + 1
-            val fileId = mapping[pageIndex] ?: "page_$pageIndex.jpg"
-            val imageUrl = "$currentCacheUrl/api/v2/books/file/$chapterId/$fileId?token=$token&is_datasaver=false&sid=$seriesId&index=$pageIndex"
+                .toString()
             MangaPage(
                 id = generateUid(imageUrl),
                 url = imageUrl,
@@ -547,20 +526,93 @@ internal class Kagane(context: MangaLoaderContext) :
         }
     }
 
+    private fun requestCloudflareVerification(url: String, cause: Throwable? = null): Nothing {
+        try {
+            context.requestBrowserAction(this, url)
+        } catch (e: UnsupportedOperationException) {
+            throw ParseException(
+                "Cloudflare verification required. Open Kagane in WebView and retry.",
+                url,
+                cause ?: e,
+            )
+        }
+        throw ParseException("Retry after Cloudflare verification.", url, cause)
+    }
+
+    private fun String.isCloudflareChallenge(): Boolean {
+        return contains("cf-mitigated", ignoreCase = true) ||
+            contains("Just a moment", ignoreCase = true) ||
+            contains("challenges.cloudflare.com", ignoreCase = true) ||
+            contains("/cdn-cgi/challenge-platform/", ignoreCase = true)
+    }
+
+    private data class ManifestPage(
+        val pageNumber: Int,
+        val pageUuid: String,
+        val ext: String?,
+    )
+
+    private fun parseManifestPages(challenge: JSONObject): List<ManifestPage> {
+        val pagesJson = challenge.optJSONObject("manifest")?.optJSONArray("pages")
+            ?: challenge.optJSONArray("pages")
+            ?: JSONArray()
+        return buildList {
+            for (i in 0 until pagesJson.length()) {
+                val page = pagesJson.optJSONObject(i) ?: continue
+                val pageUuid = page.optString("page_id")
+                    .ifBlank { page.optString("pageId") }
+                    .ifBlank { page.optString("page_uuid") }
+                    .ifBlank { page.optString("pageUuid") }
+                if (pageUuid.isBlank()) continue
+                add(
+                    ManifestPage(
+                        pageNumber = page.optInt(
+                            "page_no",
+                            page.optInt("pageNo", page.optInt("page_number", i + 1)),
+                        ),
+                        pageUuid = pageUuid,
+                        ext = page.optString("ext").ifBlank { null },
+                    ),
+                )
+            }
+        }
+    }
+
+    private var cacheUrl = "https://akari.$domain"
+    private var accessToken: String = ""
     private var cachedCert: String? = null
+    private var certificateFetchAttempted = false
     private var integrityToken: String = ""
     private var integrityTokenExp: Long = 0L
 
-    private suspend fun getCertificate(): String {
+    private suspend fun getCertificate(): String? {
         cachedCert?.let { return it }
+        if (certificateFetchAttempted) return null
+        certificateFetchAttempted = true
         val url = "$apiUrl/api/v2/static/bin.bin"
         val req = Request.Builder().url(url)
             .addHeader("Origin", "https://$domain")
             .addHeader("Referer", "https://$domain/")
+            .tag(MangaSource::class.java, source)
             .build()
 
-        val bytes = context.httpClient.newCall(req).await().body?.bytes()
-            ?: throw Exception("Failed to fetch certificate")
+        val response = runCatching {
+            context.httpClient.newCall(req).await()
+        }.getOrNull()
+        if (response == null) {
+            dbg("bin.bin fetch failed (network)")
+            return null
+        }
+        if (!response.isSuccessful) {
+            dbg("bin.bin http ${response.code}")
+            return null
+        }
+        val bytes = response.body?.bytes()?.takeIf { it.isNotEmpty() }
+        if (bytes == null) {
+            dbg("bin.bin empty body")
+            return null
+        }
+        dbg("bin.bin ok bytes=${bytes.size} head=${bytes.headHex()}")
 
         val b64 = Base64.getEncoder().encodeToString(bytes)
         cachedCert = b64
@@ -593,6 +645,17 @@ internal class Kagane(context: MangaLoaderContext) :
         return integrityToken
     }
 
+    private suspend fun getChallengeResponse(chapterId: String): JSONObject {
+        val integrityToken = getIntegrityToken()
+        val headers = getRequestHeaders().newBuilder()
+            .add("Origin", "https://$domain")
+            .add("Referer", "https://$domain/")
+            .add("x-integrity-token", integrityToken)
+            .build()
+        val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=false"
+        return webClient.httpPost(challengeUrl.toHttpUrl(), JSONObject(), headers).parseJson()
+    }
+
     private fun getPssh(chapterId: String): String {
         val hash = ":$chapterId".sha256().copyOfRange(0, 16)
 
@@ -613,6 +676,40 @@ internal class Kagane(context: MangaLoaderContext) :
         return Base64.getEncoder().encodeToString(fullBox)
     }
 
+    private fun String.toChapterNumberOrNull(): Float? = trim()
+        .replace(',', '.')
+        .toFloatOrNull()
+
+    private fun Any?.toPageFileId(): String = when (this) {
+        is String -> toFileNamePart()
+        is JSONObject -> optFirstString(
+            "pageUuid",
+            "page_uuid",
+            "pageId",
+            "page_id",
+            "fileId",
+            "file_id",
+            "fileName",
+            "file_name",
+            "filename",
+            "name",
+            "id",
+            "path",
+            "url",
+        ).toFileNamePart()
+        else -> ""
+    }
+
+    private fun JSONObject.optFirstString(vararg keys: String): String {
+        for (key in keys) {
+            val value = optString(key).trim()
+            if (value.isNotEmpty()) return value
+        }
+        return ""
+    }
+
+    private fun String.toFileNamePart(): String = substringBefore('?').substringAfterLast('/').trim()
+
     private operator fun ByteArray.plus(other: ByteArray): ByteArray {
         val result = ByteArray(this.size + other.size)
         System.arraycopy(this, 0, result, 0, this.size)
@@ -620,47 +717,17 @@ internal class Kagane(context: MangaLoaderContext) :
         return result
     }
 
-    // Interceptor logic for image decryption
     override fun intercept(chain: Interceptor.Chain): Response {
-        val url = chain.request().url
-        if (url.queryParameterNames.contains("token") && url.encodedPath.contains("/file/")) {
-            val pathSegments = url.pathSegments
-            val booksIndex = pathSegments.indexOf("books")
-            if (booksIndex != -1) {
-                val chapterId = when {
-                    booksIndex + 2 < pathSegments.size && pathSegments[booksIndex + 1] == "file" ->
-                        pathSegments[booksIndex + 2]
-                    booksIndex + 3 < pathSegments.size && pathSegments[booksIndex + 2] == "file" ->
-                        pathSegments[booksIndex + 3]
-                    else -> null
-                } ?: return chain.proceed(chain.request())
-
-                val seriesId = url.queryParameter("sid").orEmpty()
-                val seriesKey = if (seriesId.isBlank()) chapterId else seriesId
-                val index = url.queryParameter("index")?.toIntOrNull() ?: return chain.proceed(chain.request())
-                val imageResp = chain.proceed(chain.request())
-                if (!imageResp.isSuccessful) return imageResp
-
-                val contentType = imageResp.body?.contentType()
-                val imageBytes = imageResp.body?.bytes() ?: return imageResp
-
-                try {
-                    val decrypted = decryptImage(imageBytes, seriesKey, chapterId)
-                    val processed = decrypted?.let {
-                        processData(it, index, seriesKey, chapterId)
-                    }
-                    val outputBytes = processed ?: imageBytes
-                    return imageResp.newBuilder()
-                        .body(outputBytes.toResponseBody(contentType))
-                        .build()
-                } catch (_: Exception) {
-                    return imageResp.newBuilder()
-                        .body(imageBytes.toResponseBody(contentType))
-                        .build()
-                }
-            }
+        val request = chain.request()
+        val host = request.url.host
+        if (host == domain || host.endsWith(".$domain")) {
+            val newRequest = request.newBuilder()
+                .header("Origin", "https://$domain")
+                .header("Referer", "https://$domain/")
+                .build()
+            return chain.proceed(newRequest)
         }
-        return chain.proceed(chain.request())
+        return chain.proceed(request)
     }
 
     // Decryption helpers

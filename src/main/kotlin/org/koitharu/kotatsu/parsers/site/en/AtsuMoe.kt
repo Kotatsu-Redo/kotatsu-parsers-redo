@@ -167,8 +167,23 @@ internal class AtsuMoe(context: MangaLoaderContext) :
             else -> null
         }
 
-        // Fetch all chapters from the chapters endpoint with pagination
-        val chapters = fetchAllChapters(mangaId)
+        // Map of scanlationMangaId -> scanlation group (team) name
+        val scanlatorMap = LinkedHashMap<String, String>()
+        mangaPage.optJSONArray("scanlators")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val s = arr.getJSONObject(i)
+                val id = s.optString("id")
+                val name = s.optString("name")
+                if (id.isNotEmpty() && name.isNotEmpty()) {
+                    scanlatorMap[id] = name
+                }
+            }
+        }
+
+        // Atsu.moe serves the same title from multiple scanlation groups (teams). Split the
+        // chapters into one branch per team so each team keeps its full chapter list, instead
+        // of merging them into a single list with duplicate numbers.
+        val chapters = fetchAllChapters(mangaId, scanlatorMap)
 
         return manga.copy(
             title = title,
@@ -181,42 +196,28 @@ internal class AtsuMoe(context: MangaLoaderContext) :
         )
     }
 
-    private suspend fun fetchAllChapters(mangaId: String): List<MangaChapter> {
-        val allChapters = mutableListOf<MangaChapter>()
-        var currentPage = 0
-        var totalPages = 1
+    // The `allChapters` endpoint returns every chapter (no pagination) with its scanlation
+    // group (`scanlationMangaId`), unlike `manga/chapters` which caps/omits group info.
+    private suspend fun fetchAllChapters(mangaId: String, scanlatorMap: Map<String, String>): List<MangaChapter> {
+        val response = webClient.httpGet("${apiUrl}manga/allChapters?mangaId=$mangaId").parseJson()
+        val chaptersArray = response.optJSONArray("chapters") ?: return emptyList()
+        val multipleGroups = scanlatorMap.size > 1
 
-        while (currentPage < totalPages) {
-            val url = "${apiUrl}manga/chapters?id=$mangaId&filter=all&sort=desc&page=$currentPage"
-            val json = webClient.httpGet(url).parseJson()
-
-            val chaptersArray = json.getJSONArray("chapters")
-            for (i in 0 until chaptersArray.length()) {
+        return (0 until chaptersArray.length())
+            .map { i ->
                 val chapter = chaptersArray.getJSONObject(i)
-                allChapters.add(parseChapter(chapter, mangaId))
+                val groupName = scanlatorMap[chapter.optString("scanlationMangaId")]
+                // Only expose branches when several teams exist, so single-team titles
+                // don't get a pointless branch selector.
+                parseChapter(chapter, mangaId, branch = groupName.takeIf { multipleGroups }, scanlator = groupName)
             }
-
-            totalPages = json.getInt("pages")
-            currentPage++
-        }
-
-        return allChapters.reversed()
+            .sortedWith(compareBy({ it.branch }, { it.number }))
     }
 
-    private fun parseChapter(json: JSONObject, mangaId: String): MangaChapter {
+    private fun parseChapter(json: JSONObject, mangaId: String, branch: String?, scanlator: String?): MangaChapter {
         val chapterId = json.getString("id")
         val title = json.optString("title").takeIf { it.isNotEmpty() }
-        val number = json.optInt("number", 0).toFloat()
-
-        // Parse ISO date string to timestamp
-        val createdAtStr = json.optString("createdAt")
-        val uploadDate = if (createdAtStr.isNotEmpty()) {
-            try {
-                dateFormat.parse(createdAtStr)?.time ?: 0L
-            } catch (e: Exception) {
-                0L
-            }
-        } else 0L
+        val number = json.optDouble("number", 0.0).toFloat()
 
         return MangaChapter(
             id = generateUid("$mangaId/$chapterId"),
@@ -224,11 +225,20 @@ internal class AtsuMoe(context: MangaLoaderContext) :
             number = number,
             volume = 0,
             url = "$mangaId/$chapterId",
-            uploadDate = uploadDate,
+            uploadDate = parseChapterDate(json.opt("createdAt")),
             source = source,
-            scanlator = null,
-            branch = null
+            scanlator = scanlator,
+            branch = branch
         )
+    }
+
+    // `createdAt` is returned as epoch millis (number); tolerate an ISO string as a fallback
+    private fun parseChapterDate(value: Any?): Long = when (value) {
+        is Number -> value.toLong()
+        is String -> value.takeIf { it.isNotEmpty() }
+            ?.let { runCatching { dateFormat.parse(it)?.time }.getOrNull() }
+            ?: 0L
+        else -> 0L
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {

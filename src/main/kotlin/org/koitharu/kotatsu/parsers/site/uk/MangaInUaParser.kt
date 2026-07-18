@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.uk
 
+import okhttp3.Headers
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -31,6 +32,11 @@ internal class MangaInUaParser(context: MangaLoaderContext) : PagedMangaParser(
 	private val userHashRegex by lazy {
 		Regex("site_login_hash\\s*=\\s*\'([^\']+)\'", RegexOption.IGNORE_CASE)
 	}
+
+	// The DLE chapter/page AJAX endpoints only return content for requests they
+	// recognise as XHR; without this header they answer 200 with an empty body,
+	// which surfaces as a manga having no chapters (and chapters having no pages).
+	private val ajaxHeaders = Headers.headersOf("X-Requested-With", "XMLHttpRequest")
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
@@ -107,7 +113,10 @@ internal class MangaInUaParser(context: MangaLoaderContext) : PagedMangaParser(
 		}
 		val dateFormat = SimpleDateFormat("dd.MM.yyyy", Locale.US)
 		val chaptersDoc = webClient.httpPost(
-			"https://$domain/engine/ajax/controller.php?mod=load_chapters",
+			urlBuilder()
+				.addPathSegment("engine").addPathSegment("ajax").addPathSegment("controller.php")
+				.addEncodedQueryParameter("mod", "load_chapters")
+				.build(),
 			mapOf(
 				"action" to "show",
 				"news_id" to linkToComics.attrOrThrow("data-news_id"),
@@ -115,6 +124,7 @@ internal class MangaInUaParser(context: MangaLoaderContext) : PagedMangaParser(
 				"this_link" to "",
 				"user_hash" to userHash,
 			),
+			ajaxHeaders,
 		).parseHtml()
 		val chapterNodes = chaptersDoc.select(".ltcitems")
 		var prevChapterName: String? = null
@@ -162,7 +172,7 @@ internal class MangaInUaParser(context: MangaLoaderContext) : PagedMangaParser(
 			.addEncodedQueryParameter("mod", "load_chapters_image")
 			.addQueryParameter("news_id", doc.requireElementById("comics").attrOrThrow("data-news_id"))
 			.addEncodedQueryParameter("action", "show").addQueryParameter("user_hash", userHash).build()
-		val root = webClient.httpGet(ajaxUrl).parseHtml().root()
+		val root = webClient.httpGet(ajaxUrl, ajaxHeaders).parseHtml().root()
 		return root.select("li").map { ul ->
 			val img = ul.selectFirstOrThrow("img")
 			val url = img.attrAsAbsoluteUrl("data-src")

@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.pt
 
+import okhttp3.Headers
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.ContentType
@@ -15,6 +16,7 @@ internal class ImperiodaBritannia(context: MangaLoaderContext) : MangoThemeParse
 	domain = "imperiodabritannia.net",
 	cdnUrl = "https://cdn.imperiodabritannia.net",
 	encryptionKey = "mangotoons_encryption_key_2025",
+	apiBaseUrl = "https://api.imperiodabritannia.net/api",
 	webMangaPathSegment = "manga",
 	availableTagsSet = linkedSetOf<MangaTag>().apply {
 		addTag("48", "+18")
@@ -150,7 +152,12 @@ internal class ImperiodaBritannia(context: MangaLoaderContext) : MangoThemeParse
 		ContentType.NOVEL to listOf("18"),
 	),
 	adultFormatIds = setOf("23"),
-)
+) {
+	override fun getApiRequestHeaders(): Headers = super.getApiRequestHeaders().newBuilder()
+		.add("X-Noencryptionbritta", "1")
+		.add("X-API-Token", "bunker_api_token_secreto_2025")
+		.build()
+}
 
 private fun MutableSet<MangaTag>.addTag(id: String, title: String) {
 	add(MangaTag(key = id, title = title, source = MangaParserSource.IMPERIODABRITANNIA))

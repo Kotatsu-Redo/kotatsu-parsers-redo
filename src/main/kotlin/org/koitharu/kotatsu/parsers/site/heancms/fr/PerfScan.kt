@@ -4,6 +4,7 @@ import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.json.JSONArray
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.ContentRating
@@ -32,6 +33,7 @@ import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
 
+@Broken("Site inaccessible (erreur 520)")
 @MangaSourceParser("PERF_SCAN", "PerfScan", "fr")
 internal class PerfScan(context: MangaLoaderContext) :
 	HeanCms(context, MangaParserSource.PERF_SCAN, "perf-scan.xyz"), Interceptor {

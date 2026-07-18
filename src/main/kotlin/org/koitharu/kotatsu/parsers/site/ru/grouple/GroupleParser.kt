@@ -14,6 +14,7 @@ import okhttp3.Response
 import okhttp3.internal.closeQuietly
 import okio.IOException
 import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
@@ -30,7 +31,7 @@ import java.net.HttpURLConnection
 import java.text.SimpleDateFormat
 import java.util.*
 
-private const val PAGE_SIZE = 70
+private const val PAGE_SIZE = 50
 private const val NSFW_ALERT = "сексуальные сцены"
 private const val NOTHING_FOUND = "Ничего не найдено"
 private const val MIN_IMAGE_SIZE = 1024L
@@ -462,18 +463,22 @@ internal abstract class GroupleParser(
     }
 
     private suspend fun advancedSearch(offset: Int, order: SortOrder, filter: MangaListFilter): Response {
-        val tagsMap = tagsIndex.get()
+        val tagsMap = if (filter.tags.isEmpty() && filter.tagsExclude.isEmpty()) {
+            null
+        } else {
+            tagsIndex.get()
+        }
         val url = urlBuilder()
             .addPathSegment("search")
             .addPathSegment("advancedResults")
         url.addQueryParameter("q", filter.query)
         url.addQueryParameter("offset", offset.toString())
         filter.tags.forEach { tag ->
-            val tagId = requireNotNull(tagsMap[tag.title.lowercase()]) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
             url.addQueryParameter(tagId, "in")
         }
         filter.tagsExclude.forEach { tag ->
-            val tagId = requireNotNull(tagsMap[tag.title.lowercase()]) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
             url.addQueryParameter(tagId, "ex")
         }
         url.addQueryParameter(
@@ -646,16 +651,35 @@ internal abstract class GroupleParser(
 
     private suspend fun fetchTagsMap(): ScatterMap<String, String> {
         val url = "https://$domain/search/advanced"
-        val properties =
-            webClient.httpGet(url).parseHtml().body().selectFirst("form.search-form")?.select("div.form-group")
+        val document = webClient.httpGet(url).parseHtml()
+        val result = MutableScatterMap<String, String>()
+
+        document.select("script:containsData(window.__FILTERS.)").forEach { script ->
+            FILTERS_REGEX.findAll(script.data()).forEach { match ->
+                val type = match.groupValues[1]
+                val prefix = if (type == "searchFilters") "s_" else "el_"
+                val values = JSONObject(match.groupValues[2])
+                values.keys().forEach { id ->
+                    val title = values.optString(id)
+                    if (title.isNotBlank()) {
+                        result[title.lowercase()] = prefix + id.lowercase(Locale.ROOT)
+                    }
+                }
+            }
+        }
+
+        if (result.isEmpty()) {
+            document.body().selectFirst("form.search-form")?.select("div.form-group")
                 ?.find { it.selectFirst("li.property") != null }
                 ?.select("li.property")
-                ?: throw ParseException("Genres filter element not found", url)
-        val result = MutableScatterMap<String, String>(properties.size)
-        properties.forEach { li ->
-            val name = li.text().lowercase()
-            val id = li.selectFirstOrThrow("input").id()
-            result[name] = id
+                ?.forEach { li ->
+                    val name = li.text().lowercase()
+                    val id = li.selectFirstOrThrow("input").id()
+                    result[name] = id
+                }
+        }
+        if (result.isEmpty()) {
+            throw ParseException("Genres filter element not found", url)
         }
         return result
     }
@@ -695,5 +719,9 @@ internal abstract class GroupleParser(
         private val HREF_VOLUME_REGEX = Regex("""/vol(\d+)/""", RegexOption.IGNORE_CASE)
         private val HREF_CHAPTER_NUMBER_REGEX = Regex("""/vol\d+/([0-9]+(?:[.,]\d+)?)""", RegexOption.IGNORE_CASE)
         private val TITLE_CHAPTER_NUMBER_REGEX = Regex("""([0-9]+(?:[.,]\d+)?)\s*$""")
+        private val FILTERS_REGEX = Regex(
+            """window\.__FILTERS\.(genre|category|limitation|another|searchFilters)\s*=\s*([{].*?[}])\s*;""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
     }
 }

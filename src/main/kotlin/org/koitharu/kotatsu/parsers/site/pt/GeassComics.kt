@@ -6,6 +6,7 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -35,6 +36,7 @@ import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
 
+@Broken
 @MangaSourceParser("GEASSCOMICS", "Geass Comics", "pt")
 internal class GeassComics(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.GEASSCOMICS, PAGE_SIZE) {
