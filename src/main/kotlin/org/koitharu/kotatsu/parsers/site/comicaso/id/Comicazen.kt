@@ -7,4 +7,7 @@ import org.koitharu.kotatsu.parsers.site.comicaso.ComicasoParser
 
 @MangaSourceParser("COMICAZEN", "Comicazen", "id")
 internal class Comicazen(context: MangaLoaderContext) :
-	ComicasoParser(context, MangaParserSource.COMICAZEN, "comicazen.com", pageSize = 16)
+	ComicasoParser(context, MangaParserSource.COMICAZEN, "v3.comicaso.pro", pageSize = 20) {
+
+	override val apiSource: String = "comicazen"
+}
