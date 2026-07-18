@@ -8,6 +8,6 @@ import java.util.*
 
 @MangaSourceParser("NGOMIK", "Ngomik", "id")
 internal class Ngomik(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.NGOMIK, "ngomik.mom", pageSize = 20, searchPageSize = 5) {
+	MangaReaderParser(context, MangaParserSource.NGOMIK, "02.ngomik.cc", pageSize = 20, searchPageSize = 5) {
 	override val sourceLocale: Locale = Locale.ENGLISH
 }
