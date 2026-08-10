@@ -1,72 +1,73 @@
-# Kotatsu parsers
+# Kotatsu Parsers Redo
 
-This library provides a collection of manga parsers for convenient access manga available on the web. It can be used in
-JVM and Android applications.
+A maintained fork of [KotatsuApp/kotatsu-parsers](https://github.com/KotatsuApp/kotatsu-parsers) for [Kotatsu-Redo](https://github.com/Kotatsu-Redo/Kotatsu-Redo) and other Kotlin/JVM or Android clients.
 
-![Sources count](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2FKotatsuApp%2Fkotatsu-parsers%2Frefs%2Fheads%2Fmaster%2F.github%2Fsummary.yaml&query=total&label=manga%20sources&color=%23E9321C) [![](https://jitpack.io/v/KotatsuApp/kotatsu-parsers.svg)](https://jitpack.io/#KotatsuApp/kotatsu-parsers) ![License](https://img.shields.io/github/license/KotatsuApp/Kotatsu) [![Telegram](https://img.shields.io/badge/chat-telegram-60ACFF)](https://t.me/kotatsuapp) [![Discord](https://img.shields.io/discord/898363402467045416?color=5865f2&label=discord)](https://discord.gg/NNJ5RgVBC5)
+[![Sources](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2FKotatsu-Redo%2Fkotatsu-parsers-redo%2Frefs%2Fheads%2Fmaster%2F.github%2Fsummary.yaml&query=total&label=manga%20sources&color=%23E9321C)](.github/summary.yaml)
+[![JitPack](https://jitpack.io/v/Kotatsu-Redo/kotatsu-parsers-redo.svg)](https://jitpack.io/#Kotatsu-Redo/kotatsu-parsers-redo)
+[![License: GPL-3.0](https://img.shields.io/github/license/Kotatsu-Redo/kotatsu-parsers-redo)](LICENSE)
 
-## Usage
+The fork preserves the original parser API while maintaining source integrations and compatibility needed by Kotatsu-Redo. The project contains the parser library and a KSP module that generates the source registry and summary metadata.
 
-1. Add it to your root build.gradle at the end of repositories:
+## Use the library
 
-   ```groovy
-   allprojects {
-	   repositories {
-		   ...
-		   maven { url 'https://jitpack.io' }
-	   }
-   }
-   ```
+Add JitPack to your repositories:
 
-2. Add the dependency
+```kotlin
+repositories {
+    maven("https://jitpack.io")
+}
+```
 
-   For Java/Kotlin project:
-    ```groovy
-    dependencies {
-        implementation("com.github.KotatsuApp:kotatsu-parsers:$parsers_version")
+Add a tagged version, commit hash, or JitPack snapshot as the dependency version:
+
+```kotlin
+dependencies {
+    implementation("com.github.Kotatsu-Redo:kotatsu-parsers-redo:<version>")
+}
+```
+
+For Android, exclude the JVM `org.json` implementation:
+
+```kotlin
+dependencies {
+    implementation("com.github.Kotatsu-Redo:kotatsu-parsers-redo:<version>") {
+        exclude(group = "org.json", module = "json")
     }
-    ```
+}
+```
 
-   For Android project:
-    ```groovy
-    dependencies {
-        implementation("com.github.KotatsuApp:kotatsu-parsers:$parsers_version") {
-            exclude group: 'org.json', module: 'json'
-        }
-    }
-    ```
+Android consumers must enable [core library desugaring](https://developer.android.com/studio/write/java8-support#library-desugaring), including the required NIO APIs.
 
-   Versions are available on [JitPack](https://jitpack.io/#KotatsuApp/kotatsu-parsers)
+Create a parser through your `MangaLoaderContext` implementation:
 
-   When used in Android
-   projects, [core library desugaring](https://developer.android.com/studio/write/java8-support#library-desugaring) with
-   the [NIO specification](https://developer.android.com/studio/write/java11-nio-support-table) should be enabled to
-   support Java 8+ features.
+```kotlin
+val parser = mangaLoaderContext.newParserInstance(MangaParserSource.MANGADEX)
+```
 
+Reference implementations are available for [Android](https://github.com/KotatsuApp/Kotatsu/blob/devel/app/src/main/kotlin/org/koitharu/kotatsu/core/parser/MangaLoaderContextImpl.kt) and [JVM](https://github.com/KotatsuApp/kotatsu-dl/blob/master/src/main/kotlin/org/koitharu/kotatsu/dl/parsers/MangaLoaderContextImpl.kt) clients.
 
-3. Usage in code
+## Develop
 
-   ```kotlin
-   val parser = mangaLoaderContext.newParserInstance(MangaParserSource.MANGADEX)
-   ```
+Requirements:
 
-   `mangaLoaderContext` is an implementation of the `MangaLoaderContext` class.
-   See examples
-   of [Android](https://github.com/KotatsuApp/Kotatsu/blob/devel/app/src/main/kotlin/org/koitharu/kotatsu/core/parser/MangaLoaderContextImpl.kt)
-   and [Non-Android](https://github.com/KotatsuApp/kotatsu-dl/blob/master/src/main/kotlin/org/koitharu/kotatsu/dl/parsers/MangaLoaderContextImpl.kt)
-   implementation.
+- JDK 17
+- the checked-in Gradle wrapper
 
-## Projects that use the library
+```shell
+git clone https://github.com/Kotatsu-Redo/kotatsu-parsers-redo.git
+cd kotatsu-parsers-redo
+./gradlew check
+```
 
-- [Kotatsu-Redo](https://github.com/Kotatsu-Redo/Kotatsu-Redo)
-- [Futon](https://github.com/AppFuton/Futon)
-- [Kototoro](https://github.com/Kototoro-app/Kototoro)
-  
-## Contribution
+See:
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the guidelines.
+- [Development guide](docs/development.md) for project layout and commands
+- [Parser contribution guide](CONTRIBUTING.md) for parser implementation details
+- [Fork maintenance policy](docs/maintenance.md) for scope and upstream handling
+- [Plan](docs/plan.md) for current initialization and maintenance work
 
-## DMCA disclaimer
+## License and content disclaimer
 
-The developers of this application have no affiliation with the content available in the app. It is collected from
-sources freely available through any web browser.
+This fork retains the upstream [GPL-3.0 license](LICENSE).
+
+The maintainers are not affiliated with the websites accessed by the parsers and do not host their content. Parsers access information already available through a web browser. Source owners can use the repository's issue templates to report a concern or request removal.
