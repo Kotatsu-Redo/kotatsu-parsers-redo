@@ -24,7 +24,6 @@ import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.parseSafe
-import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
 import java.util.EnumSet
@@ -66,17 +65,14 @@ internal class RimuScans(context: MangaLoaderContext) :
 	)
 
 	// The whole catalogue (429+ titles) is embedded in the homepage Next.js payload.
-	private val allMangaCache = suspendLazy {
+	// Fetched fresh on every list load so a pull-to-refresh surfaces newly added titles.
+	private suspend fun loadCatalogue(): List<MangaCache> {
 		val doc = webClient.httpGet("https://$domain/").parseHtml()
-		extractMangaObjects(decodePayload(doc)).map { parseMangaFromJson(it) }
-	}
-
-	private val allTagsCache = suspendLazy {
-		allMangaCache.get().flatMap { it.manga.tags }.toSet()
+		return extractMangaObjects(decodePayload(doc)).map { parseMangaFromJson(it) }
 	}
 
 	override suspend fun getFilterOptions() = MangaListFilterOptions(
-		availableTags = allTagsCache.get(),
+		availableTags = loadCatalogue().flatMapTo(LinkedHashSet()) { it.manga.tags },
 		availableStates = EnumSet.of(
 			MangaState.ONGOING,
 			MangaState.FINISHED,
@@ -90,7 +86,7 @@ internal class RimuScans(context: MangaLoaderContext) :
 	)
 
 	override suspend fun getList(order: SortOrder, filter: MangaListFilter): List<Manga> {
-		var list = allMangaCache.get()
+		var list = loadCatalogue()
 
 		if (!filter.query.isNullOrEmpty()) {
 			val query = filter.query.lowercase(sourceLocale)
