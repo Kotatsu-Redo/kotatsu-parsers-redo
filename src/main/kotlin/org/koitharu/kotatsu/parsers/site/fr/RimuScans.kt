@@ -25,6 +25,7 @@ import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.parseSafe
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
@@ -49,6 +50,12 @@ internal class RimuScans(context: MangaLoaderContext) :
 		isAuthorSearchSupported = true,
 		isTagsExclusionSupported = true,
 	)
+
+	private companion object {
+		// Widths accepted by the site's Next.js image optimizer (defaults include 640 and 1080).
+		private const val COVER_WIDTH = 640
+		private const val PAGE_WIDTH = 1080
+	}
 
 	private val isoDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.FRENCH).apply {
 		timeZone = TimeZone.getTimeZone("UTC")
@@ -130,7 +137,7 @@ internal class RimuScans(context: MangaLoaderContext) :
 
 		val cover = json.getStringOrNull("cover")
 			?.takeIf { it.isNotBlank() && it != "null" }
-			?.toAbsoluteUrl(domain)
+			?.let { optimizedImageUrl(it, COVER_WIDTH) }
 
 		val authors = buildSet {
 			addAll(splitNames(json.getStringOrNull("author")))
@@ -191,7 +198,7 @@ internal class RimuScans(context: MangaLoaderContext) :
 
 		val enriched = detail?.let { json ->
 			val cover = json.getStringOrNull("cover")?.takeIf { it.isNotBlank() && it != "null" }
-				?.toAbsoluteUrl(domain)
+				?.let { optimizedImageUrl(it, COVER_WIDTH) }
 			manga.copy(
 				coverUrl = cover ?: manga.coverUrl,
 				description = json.getStringOrNull("description")?.takeIf { it.isNotBlank() && it != "null" }
@@ -251,18 +258,34 @@ internal class RimuScans(context: MangaLoaderContext) :
 
 		// The reader renders each page as <img src="/uploads/mangas/{slug}/chapters/{n}/NNN.jpg?v=...">.
 		// The credits page lives under /uploads/credits/ and is excluded by the selector.
+		// Pages are served through the Next.js image optimizer so they arrive as WebP: this
+		// dodges buggy hardware JPEG decoders (e.g. MediaTek libjpeg-alpha) and cuts bandwidth.
 		return doc.select("img[src*=/uploads/mangas/][src*=/chapters/]")
 			.mapNotNull { it.attr("src").trim().takeIf(String::isNotEmpty) }
 			.distinct()
 			.map { src ->
-				val absUrl = src.toAbsoluteUrl(domain)
+				val optimized = optimizedImageUrl(src, PAGE_WIDTH)
 				MangaPage(
-					id = generateUid(absUrl),
-					url = absUrl,
+					id = generateUid(optimized),
+					url = optimized,
 					preview = null,
 					source = chapter.source,
 				)
 			}
+	}
+
+	/**
+	 * Routes an on-site image path through the Next.js image optimizer (`/_next/image`),
+	 * which serves WebP/AVIF instead of the original JPEG.
+	 */
+	private fun optimizedImageUrl(path: String, width: Int): String {
+		val relative = when {
+			path.startsWith("http", ignoreCase = true) -> "/" + path.substringAfter("://").substringAfter('/')
+			path.startsWith("/") -> path
+			else -> "/$path"
+		}
+		val encoded = URLEncoder.encode(relative, "UTF-8")
+		return "https://$domain/_next/image?url=$encoded&w=$width&q=75"
 	}
 
 	// --- helpers ---
