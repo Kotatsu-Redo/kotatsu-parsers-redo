@@ -17,6 +17,14 @@ internal class MangasOrigines(context: MangaLoaderContext) :
 	override val tagPrefix = "manga-genres/"
 	override val listUrl = "oeuvre/"
 
+	// The "child-origines" theme redesign puts the synopsis in <div class="ori-sr-syn-texte">,
+	// which none of the default Madara selectors match (summaries came up empty). Keep the
+	// base selectors as a fallback for any page still using the old markup.
+	override val selectDesc =
+		"div.ori-sr-syn-texte, div.description-summary div.summary__content, " +
+			"div.summary_content div.post-content_item > h5 + div, div.summary_content div.manga-excerpt, " +
+			"div.post-content div.manga-summary, div.post-content div.desc, div.c-page__content div.summary__content"
+
 	// The "child-origines" theme loads chapters through a custom, nonce-protected
 	// AJAX endpoint (the standard Madara /ajax/chapters/ and manga_get_chapters both
 	// return 403/400). Instead we read the complete chapter list from the
