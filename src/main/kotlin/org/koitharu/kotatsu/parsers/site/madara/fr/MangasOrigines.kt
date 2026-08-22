@@ -71,15 +71,17 @@ internal class MangasOrigines(context: MangaLoaderContext) :
 			.sortedBy { it.number }
 	}
 
-	// Images are <img class="wp-manga-chapter-img" src=" https://..."> — note the
-	// leading space in src, which breaks the default Madara extraction.
+	// Images are <img class="wp-manga-chapter-img" data-src=" https://..."> — the reader now
+	// lazy-loads them (real URL in data-src, empty src) and keeps the leading space in the URL.
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val fullUrl = chapter.url.toAbsoluteUrl(domain)
 		val doc = webClient.httpGet(fullUrl).parseHtml()
 		val images = doc.select("div.reading-content img.wp-manga-chapter-img")
 			.ifEmpty { doc.select("img.wp-manga-chapter-img") }
 		return images.mapNotNull { img ->
-			val src = img.attr("src").trim().ifEmpty { return@mapNotNull null }
+			val src = img.attr("data-src").trim().takeIf { it.isNotEmpty() }
+				?: img.attr("src").trim().takeIf { it.isNotEmpty() }
+				?: return@mapNotNull null
 			val url = src.toRelativeUrl(domain)
 			MangaPage(
 				id = generateUid(url),
