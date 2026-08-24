@@ -2,10 +2,12 @@ package org.koitharu.kotatsu.parsers.site.en
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.internal.closeQuietly
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -35,6 +37,10 @@ internal class Comix(context: MangaLoaderContext) :
         super.onCreateConfig(keys)
         keys.add(userAgentKey)
         keys.add(ConfigKey.DisableUpdateChecking(defaultValue = true))
+        // Lets the app resolve a challenge headlessly instead of putting a browser in
+        // front of the user: WebViewExecutor reads this key to pick its intercepting
+        // CloudFlare client.
+        keys.add(ConfigKey.InterceptCloudflare(defaultValue = true))
     }
 
     override val filterCapabilities: MangaListFilterCapabilities
@@ -128,7 +134,11 @@ internal class Comix(context: MangaLoaderContext) :
                 addParam("sort=relevance:desc")
             } else {
                 when (order) {
-                    SortOrder.RELEVANCE -> addParam("order[relevance]=desc")
+                    // Relevance is only meaningful alongside a keyword, and it is
+                    // not an `order[...]` field at all — the site passes it as
+                    // `sort=relevance:desc`. With no query it falls back to the
+                    // latest-update ordering, same as the website does.
+                    SortOrder.RELEVANCE -> addParam("order[chapter_updated_at]=desc")
                     SortOrder.UPDATED -> addParam("order[chapter_updated_at]=desc")
                     SortOrder.POPULARITY -> addParam("order[views_30d]=desc")
                     SortOrder.NEWEST -> addParam("order[created_at]=desc")
@@ -173,12 +183,21 @@ internal class Comix(context: MangaLoaderContext) :
      * GET is tried first for the rare route that does inline `script#initial-data`.
      */
     private suspend fun loadBrowseItems(browseUrl: String): JSONArray {
+        var sawCloudflare = false
         runCatching { webClient.httpGet(browseUrl).parseHtml() }
+            .onFailure { sawCloudflare = it.isCloudFlareProtection() }
             .getOrNull()
             ?.let { extractInitialDataItems(it) }
             ?.let { return it }
 
-        val response = evaluateWebViewApiJson(browseUrl, BROWSE_CAPTURE_SCRIPT)
+        val response = try {
+            evaluateWebViewApiJson(browseUrl, BROWSE_CAPTURE_SCRIPT)
+        } catch (e: Exception) {
+            if (sawCloudflare || e.isCloudFlareProtection()) {
+                requestCloudflareVerification(browseUrl, e)
+            }
+            throw e
+        }
         return response.optJSONObject("result")?.optJSONArray("items")
             ?: response.optJSONArray("items")
             ?: throw ParseException("Comix browse page returned no results", browseUrl)
@@ -193,16 +212,26 @@ internal class Comix(context: MangaLoaderContext) :
      * we need (vs. a challenge/empty shell), so we keep retrying until it does.
      */
     private suspend fun loadRenderedDocument(url: String, isReady: (Document) -> Boolean): Document? {
+        var sawCloudflare = false
         repeat(WEBVIEW_PAGE_ATTEMPTS) {
             runCatching { webClient.httpGet(url).parseHtml() }
+                .onFailure { if (it.isCloudFlareProtection()) sawCloudflare = true }
                 .getOrNull()
                 ?.takeIf(isReady)
                 ?.let { return it }
 
             val html = context.evaluateJs(url, PAGE_HTML_SCRIPT, WEBVIEW_PAGE_TIMEOUT)
             if (!html.isNullOrBlank()) {
+                if (html == CLOUDFLARE_BLOCKED || isCloudflarePage(html)) {
+                    requestCloudflareVerification(url)
+                }
                 Jsoup.parse(html, url).takeIf(isReady)?.let { return it }
             }
+        }
+        // Every attempt came back as a challenge rather than the page. The caller
+        // falls back to what it already knows rather than interrupting the user.
+        if (sawCloudflare) {
+            return null
         }
         return null
     }
@@ -246,7 +275,7 @@ internal class Comix(context: MangaLoaderContext) :
             publicUrl = "https://comix.to/title/$hashId",
             coverUrl = coverUrl,
             title = title,
-            altTitles = emptySet(),
+            altTitles = parseAltTitles(json),
             description = description,
             rating = if (rating > 0) (rating / 10.0).toFloat() else RATING_UNKNOWN,
             tags = parseTerms(json),
@@ -300,10 +329,19 @@ internal class Comix(context: MangaLoaderContext) :
 
         // Capture the reader page's own (signed, decrypted) page payload rather
         // than re-implementing the request signing, which hangs (see [loadAllChapters]).
+        var sawCloudflare = false
         val response = runCatching { webClient.httpGet(readerUrl).parseHtml() }
+            .onFailure { sawCloudflare = it.isCloudFlareProtection() }
             .getOrNull()
             ?.let { extractInitialDataPages(it) }
-            ?: evaluateWebViewApiJson(readerUrl, PAGE_CAPTURE_SCRIPT)
+            ?: try {
+                evaluateWebViewApiJson(readerUrl, PAGE_CAPTURE_SCRIPT)
+            } catch (e: Exception) {
+                if (sawCloudflare || e.isCloudFlareProtection()) {
+                    requestCloudflareVerification(readerUrl, e)
+                }
+                throw e
+            }
         val pagesRoot = response.optJSONObject("result")?.optJSONObject("pages")
         val baseUrl = pagesRoot?.optString("baseUrl").orEmpty().trimEnd('/')
         val pages = pagesRoot?.optJSONArray("items")
@@ -318,21 +356,35 @@ internal class Comix(context: MangaLoaderContext) :
             } else {
                 "$baseUrl/${rawUrl.trimStart('/')}"
             }
-            // `s == 1` marks a "v3" tile-scrambled image. The server only returns
-            // the x-scramble-*/x-enc-* headers when the request carries the `v3`
-            // query flag, so we add it here; the interceptor then descrambles based
-            // on those headers. The `#scrambled` fragment (dropped before the request
-            // is sent) keeps scrambled pages from colliding with any unscrambled
-            // namesake in the cache.
-            val finalUrl = if (item?.optInt("s", 0) == 1) {
-                val withV3 = if (imageUrl.toHttpUrl().queryParameterNames.contains("v3")) {
-                    imageUrl
-                } else {
-                    imageUrl.toHttpUrl().newBuilder().addQueryParameter("v3", null).build().toString()
+            // `s == 1` (or a `v3` flag already on the url) marks a "v3" tile-scrambled
+            // image. The server only returns the x-scramble-* headers when the request
+            // carries the `v3` query flag, so we add it here; the interceptor then
+            // descrambles based on those headers.
+            //
+            // Everything else may still be protected by the older byte-level XOR, which
+            // the server applies to every fourth page. Those responses only carry
+            // x-enc-seed when the request has an `Origin` header — the exact opposite of
+            // the v3 images, which withhold x-scramble-seed when `Origin` is present —
+            // so the two kinds are tagged apart here and [intercept] sets the header for
+            // the legacy ones only.
+            //
+            // Both fragments are dropped before the request goes out; they also keep a
+            // protected page from colliding with an unprotected namesake in the cache.
+            val parsedUrl = imageUrl.toHttpUrlOrNull()
+            val isV3 = item?.optInt("s", 0) == 1 || parsedUrl?.queryParameterNames?.contains("v3") == true
+            val isLegacyScramble = !isV3 && (i + 1) % 4 == 0
+            val finalUrl = when {
+                isV3 -> {
+                    val withV3 = if (parsedUrl == null || parsedUrl.queryParameterNames.contains("v3")) {
+                        imageUrl
+                    } else {
+                        parsedUrl.newBuilder().addQueryParameter("v3", null).build().toString()
+                    }
+                    "$withV3#$SCRAMBLED_FRAGMENT"
                 }
-                "$withV3#$SCRAMBLED_FRAGMENT"
-            } else {
-                imageUrl
+
+                isLegacyScramble -> "$imageUrl#$LEGACY_SCRAMBLED_FRAGMENT"
+                else -> imageUrl
             }
             MangaPage(
                 id = generateUid("$chapterId-$i"),
@@ -344,7 +396,18 @@ internal class Comix(context: MangaLoaderContext) :
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        val response = chain.proceed(chain.request())
+        // Legacy byte-XOR images only come back with their x-enc-* headers when the
+        // request carries an `Origin`; v3 tile-scrambled ones do the reverse and
+        // withhold x-scramble-seed when it is present, so it is added for the pages
+        // [getPages] tagged as legacy and for nothing else.
+        val request = chain.request().let { original ->
+            if (original.url.fragment == LEGACY_SCRAMBLED_FRAGMENT && original.header("Origin") == null) {
+                original.newBuilder().header("Origin", "https://$domain").build()
+            } else {
+                original
+            }
+        }
+        val response = retryScramblePathFallbacks(chain, request, chain.proceed(request))
         if (!response.isSuccessful) {
             return response
         }
@@ -397,10 +460,43 @@ internal class Comix(context: MangaLoaderContext) :
         }
     }
 
+    /**
+     * The CDN keeps the same image under several interchangeable path segments
+     * (`/i5/`, `/si/`, `/i/`, `/sii/`, `/ii/`) and the one the page list hands out
+     * is not always the one that exists, so a 404 is retried against the others
+     * before giving up.
+     */
+    private fun retryScramblePathFallbacks(
+        chain: Interceptor.Chain,
+        request: Request,
+        response: Response,
+    ): Response {
+        if (response.code != 404) {
+            return response
+        }
+        val url = request.url.toString()
+        val fallbacks = SCRAMBLE_PATH_FALLBACKS
+            .map { url.replaceFirst(SCRAMBLE_PATH_FALLBACK_REGEX, it) }
+            .filter { it != url }
+        if (fallbacks.isEmpty()) {
+            return response
+        }
+        var lastResponse = response
+        for (fallbackUrl in fallbacks) {
+            lastResponse.closeQuietly()
+            lastResponse = chain.proceed(request.newBuilder().url(fallbackUrl).build())
+            if (lastResponse.code != 404) {
+                break
+            }
+        }
+        return lastResponse
+    }
+
     // A handful of older images ship a constant hash that gets folded into the
     // scramble seed; everything else (and the modern format) uses the seed as-is.
     private fun decodeScrambleHash(hash: String?): Int = when (hash?.trim()) {
         "03632" -> 58414
+        "02900" -> 117532
         else -> 0
     }
 
@@ -595,19 +691,28 @@ internal class Comix(context: MangaLoaderContext) :
             ?: if (group?.optInt("o") == 1) "Official" else "Unknown"
     }
 
+    /**
+     * The title page ships no chapters in `script#initial-data` — the list comes over
+     * a signed XHR after hydration — so the page's own code has to make the call for
+     * us. The script does not need the rendered list though: it pulls the signing
+     * bundle the page's main module references and talks to the chapter API directly.
+     */
     private suspend fun loadAllChapters(hashId: String): JSONObject {
         val titleUrl = "https://$domain/title/$hashId"
 
-        // The title page ships no chapters in `script#initial-data` — the list is
-        // fetched over the signed XHR after hydration — so the page has to render
-        // it for us. [CHAPTER_SCRIPT] scrapes the rendered list and walks the
-        // pager, which is why it doesn't matter that our hooks are installed only
-        // after the first request has already been made and parsed.
-        val response = evaluateWebViewApiJson(titleUrl, CHAPTER_SCRIPT, CHAPTER_WEBVIEW_TIMEOUT)
+        // No HTTP fetch of the title page here: the script runs on that very page in
+        // the WebView and reads the module tag itself, so this starts straight away
+        // and in parallel with the details request rather than queueing behind it.
+        val response = evaluateWebViewApiJson(
+            pageUrl = titleUrl,
+            script = chapterScript(hashId.toJsString(), cachedEnvUrl?.toJsString() ?: "null"),
+            timeoutMs = CHAPTER_WEBVIEW_TIMEOUT,
+        )
+        // The bundle url only changes when the site is redeployed, so reusing it saves
+        // downloading the whole main bundle on every later chapter load.
+        response.optString("env").nullIfEmpty()?.let { cachedEnvUrl = it }
         val items = response.optJSONArray("items")
             ?: throw ParseException("Comix chapter capture returned no items array", titleUrl)
-        // `empty` means the page rendered its "No chapters match." state, i.e. the
-        // title really has none — as opposed to us never seeing it render.
         if (items.length() == 0 && !response.optBoolean("empty")) {
             throw ParseException("Comix chapter list did not load", titleUrl)
         }
@@ -633,66 +738,102 @@ internal class Comix(context: MangaLoaderContext) :
         timeoutMs: Long = WEBVIEW_API_TIMEOUT,
     ): JSONObject {
         val bridgeScript = buildWebViewApiBridgeScript(script)
-        val requests = runCatching {
-            context.interceptWebViewRequests(
-                pageUrl,
-                InterceptionConfig(
-                    timeoutMs = timeoutMs,
-                    maxRequests = 1,
-                    urlPattern = INTERCEPT_URL_REGEX,
-                    pageScript = bridgeScript,
-                ),
-            )
-        }.getOrElse { e ->
-            throw ParseException("Comix WebView API interception failed", pageUrl, e)
-        }
-        val resultUrl = requests.firstOrNull()?.url
-            ?: throw ParseException("Comix WebView API did not return a bridge result", pageUrl)
-        val decoded = when {
-            resultUrl.contains("/error", ignoreCase = true) -> {
-                val message = resultUrl.queryParameterValue("msg") ?: "unknown WebView error"
-                throw ParseException("Comix WebView API failed: $message", pageUrl)
+        repeat(WEBVIEW_NAVIGATION_ATTEMPTS) { attempt ->
+            val navigationUrl = if (attempt == 0) pageUrl else pageUrl.withWebViewCacheBuster()
+            val requests = runCatching {
+                context.interceptWebViewRequests(
+                    navigationUrl,
+                    InterceptionConfig(
+                        timeoutMs = timeoutMs,
+                        maxRequests = 1,
+                        urlPattern = INTERCEPT_URL_REGEX,
+                        pageScript = bridgeScript,
+                    ),
+                )
+            }.getOrElse { e ->
+                throw ParseException("Comix WebView API interception failed", pageUrl, e)
             }
-            else -> resultUrl.queryParameterValue("data")
-                ?: throw ParseException("Comix WebView API bridge result missing data", pageUrl)
+            val resultUrl = requests.firstOrNull()?.url
+                ?: throw ParseException("Comix WebView API did not return a bridge result", pageUrl)
+            val decoded = when {
+                resultUrl.contains("/error", ignoreCase = true) -> {
+                    val message = resultUrl.queryParameterValue("msg") ?: "unknown WebView error"
+                    throw ParseException("Comix WebView API failed: $message", pageUrl)
+                }
+                else -> resultUrl.base64QueryParameterValue("data64")
+                    ?: resultUrl.queryParameterValue("data")
+                    ?: throw ParseException("Comix WebView API bridge result missing data", pageUrl)
+            }
+            if (decoded == WEBVIEW_LOAD_FAILED) {
+                if (attempt + 1 < WEBVIEW_NAVIGATION_ATTEMPTS) return@repeat
+                requestWebViewRecovery(pageUrl)
+            }
+            if (decoded == CLOUDFLARE_BLOCKED || isCloudflarePage(decoded)) {
+                requestCloudflareVerification(pageUrl)
+            }
+            if (decoded.isBlank()) {
+                throw ParseException("Comix WebView API returned an empty response", pageUrl)
+            }
+            val json = runCatching { JSONObject(decoded) }.getOrElse { e ->
+                throw ParseException("Comix WebView API returned invalid JSON: ${decoded.take(200)}", pageUrl, e)
+            }
+            json.optString("error").nullIfEmpty()?.let { error ->
+                throw ParseException("Comix WebView API failed: $error", pageUrl)
+            }
+            return json
         }
-        if (decoded == CLOUDFLARE_BLOCKED || isCloudflarePage(decoded)) {
-            requestCloudflareVerification(pageUrl)
-        }
-        if (decoded.isBlank()) {
-            throw ParseException("Comix WebView API returned an empty response", pageUrl)
-        }
-        val json = runCatching { JSONObject(decoded) }.getOrElse { e ->
-            throw ParseException("Comix WebView API returned invalid JSON: ${decoded.take(200)}", pageUrl, e)
-        }
-        json.optString("error").nullIfEmpty()?.let { error ->
-            throw ParseException("Comix WebView API failed: $error", pageUrl)
-        }
-        return json
+        throw ParseException("Comix WebView API could not load the page", pageUrl)
+    }
+
+    private fun String.withWebViewCacheBuster(): String {
+        return toHttpUrlOrNull()?.newBuilder()
+            ?.removeAllQueryParameters(WEBVIEW_CACHE_BUSTER_PARAM)
+            ?.addQueryParameter(WEBVIEW_CACHE_BUSTER_PARAM, System.currentTimeMillis().toString())
+            ?.build()
+            ?.toString()
+            ?: this
     }
 
     private fun buildWebViewApiBridgeScript(script: String): String {
+        // The script is injected on every navigation and polled while a page is up,
+        // so it can start many times over. One run at a time, and a run that has
+        // nothing yet (null) leaves without navigating so a later one can try again.
         return """
-            (async function() {
-                try {
-                    const result = await $script;
-                    window.location.href = "$INTERCEPT_RESULT_URL#data=" + encodeURIComponent(String(result || ""));
-                } catch (e) {
-                    window.location.href = "$INTERCEPT_ERROR_URL#msg=" + encodeURIComponent(String((e && e.message) || e));
-                }
+            (function() {
+                const state = '__comixBridgeState';
+                if (window[state]) return;
+                window[state] = true;
+                (async function() {
+                    try {
+                        const result = await $script;
+                        if (result === null || result === undefined || result === "") {
+                            window[state] = false;
+                            return;
+                        }
+                        const bytes = new TextEncoder().encode(String(result));
+                        let binary = '';
+                        const chunkSize = 0x8000;
+                        for (let i = 0; i < bytes.length; i += chunkSize) {
+                            binary += String.fromCharCode.apply(
+                                null,
+                                bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+                            );
+                        }
+                        const data = btoa(binary)
+                            .replace(/\+/g, '-')
+                            .replace(/\//g, '_')
+                            .replace(/=+$/g, '');
+                        window.location.href = "$INTERCEPT_RESULT_URL#data64=" + data;
+                    } catch (e) {
+                        window.location.href = "$INTERCEPT_ERROR_URL#msg=" +
+                            encodeURIComponent(String((e && e.message) || e));
+                    }
+                })();
             })();
         """.trimIndent()
     }
 
-    private fun requestCloudflareVerification(url: String, cause: Throwable? = null): Nothing {
-        try {
-            context.requestBrowserAction(this, url)
-        } catch (e: UnsupportedOperationException) {
-            throw ParseException(CLOUDFLARE_MESSAGE, url, cause ?: e)
-        }
-    }
-
-    private fun String.queryParameterValue(name: String): String? {
+    private fun String.rawQueryParameterValue(name: String): String? {
         val query = substringAfter('#', substringAfter('?', ""))
         if (query.isEmpty()) return null
         return query.split('&')
@@ -700,7 +841,19 @@ internal class Comix(context: MangaLoaderContext) :
             .map { it.split('=', limit = 2) }
             .firstOrNull { it.size == 2 && it[0] == name }
             ?.get(1)
+    }
+
+    private fun String.queryParameterValue(name: String): String? {
+        return rawQueryParameterValue(name)
             ?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+    }
+
+    private fun String.base64QueryParameterValue(name: String): String? {
+        return rawQueryParameterValue(name)?.let { encoded ->
+            runCatching {
+                String(Base64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8)
+            }.getOrNull()
+        }
     }
 
     private fun String.toJsString(): String {
@@ -711,18 +864,51 @@ internal class Comix(context: MangaLoaderContext) :
             .replace("\t", "\\t") + "\""
     }
 
+    /** Detected here, resolved by the app. */
+    private fun requestCloudflareVerification(url: String, cause: Throwable? = null): Nothing {
+        try {
+            context.requestCloudflareVerification(this, url)
+        } catch (e: UnsupportedOperationException) {
+            throw ParseException(CLOUDFLARE_MESSAGE, url, cause ?: e)
+        }
+    }
+
+    private fun requestWebViewRecovery(url: String): Nothing {
+        try {
+            context.requestBrowserAction(this, url)
+        } catch (e: UnsupportedOperationException) {
+            throw ParseException(WEBVIEW_LOAD_MESSAGE, url, e)
+        }
+    }
+
+    /**
+     * The app raises its own Cloudflare exception from a module this library cannot
+     * reference by type, so it is recognised by name instead.
+     */
+    private fun Throwable.isCloudFlareProtection(): Boolean {
+        var error: Throwable? = this
+        var depth = 0
+        while (error != null && depth < CAUSE_CHAIN_LIMIT) {
+            if (error.javaClass.simpleName.contains("CloudFlare", ignoreCase = true)) return true
+            if (error.message?.contains("cloudflare", ignoreCase = true) == true) return true
+            error = error.cause
+            depth++
+        }
+        return false
+    }
+
     private fun isCloudflarePage(html: String): Boolean {
         if (html.isBlank()) return false
         val lower = html.lowercase(Locale.US)
-        return lower.contains("<title>just a moment") ||
-            ((lower.contains("just a moment") || lower.contains("checking your browser")) && lower.contains("cloudflare")) ||
-            lower.contains("cf-browser-verification") ||
+        return lower.contains("cf-browser-verification") ||
             lower.contains("cf-chl-opt") ||
+            lower.contains("window._cf_chl_opt") ||
+            lower.contains("__cf_chl") ||
             lower.contains("challenge-platform") ||
             lower.contains("challenges.cloudflare.com") ||
             lower.contains("cf-turnstile") ||
-            lower.contains("turnstile") ||
-            lower.contains("we're maintaining the site")
+            lower.contains("challenge-error-title") ||
+            lower.contains("challenge-error-text")
     }
 
     private fun parseTerms(json: JSONObject): Set<MangaTag> {
@@ -752,6 +938,10 @@ internal class Comix(context: MangaLoaderContext) :
         }
     }
 
+    /** Url of the site's env bundle, reused across chapter loads. */
+    @Volatile
+    private var cachedEnvUrl: String? = null
+
     private val tagIdCache = ConcurrentHashMap<String, String>()
 
     /**
@@ -777,6 +967,14 @@ internal class Comix(context: MangaLoaderContext) :
         }
         tagIdCache[cacheKey] = ""
         return null
+    }
+
+    /** `altTitles` on the current payload, `alt_titles` on the older one. */
+    private fun parseAltTitles(json: JSONObject): Set<String> {
+        val titles = json.optJSONArray("altTitles") ?: json.optJSONArray("alt_titles") ?: return emptySet()
+        return (0 until titles.length()).mapNotNullTo(LinkedHashSet()) { i ->
+            titles.optString(i).trim().nullIfEmpty()
+        }
     }
 
     private fun parseAuthors(json: JSONObject): Set<String> {
@@ -825,6 +1023,9 @@ internal class Comix(context: MangaLoaderContext) :
         private val TERM_KEYS = arrayOf("genres", "genre", "tags", "theme", "demographics", "demographic", "formats")
         private val ADULT_EXCLUDE_IDS = listOf("87264", "87266", "87268", "87265") // Adult, Hentai, Smut, Ecchi
         private const val SCRAMBLED_FRAGMENT = "scrambled"
+        private const val LEGACY_SCRAMBLED_FRAGMENT = "enc-scrambled"
+        private val SCRAMBLE_PATH_FALLBACKS = listOf("/i5/", "/si/", "/i/", "/sii/", "/ii/")
+        private val SCRAMBLE_PATH_FALLBACK_REGEX = Regex("/(?:i5|s?i+)/")
         private const val GRID_COLS = 5
         private const val GRID_ROWS = 5
         private const val NUM_TILES = GRID_COLS * GRID_ROWS
@@ -845,332 +1046,248 @@ internal class Comix(context: MangaLoaderContext) :
         // list has stalled and returning what it already has.
         private const val CHAPTER_STALL_MS = 45000
 
+        // Ceiling for the API fast path: 100 chapters a call, so this is far beyond
+        // any real series and only guards against a pager that never reports its end.
+        private const val MAX_CHAPTER_API_PAGES = 200
+
+        // How long the fast path waits for the page's main module to appear before
+        // giving up on it and falling back to walking the rendered pager.
+        private const val BUNDLE_WAIT_MS = 20000
+
         // Below this, a timestamp is seconds rather than milliseconds
         // (2286-11-20 in seconds, 1973-03-03 in milliseconds).
         private const val SECONDS_TIMESTAMP_LIMIT = 10_000_000_000L
         private const val CLOUDFLARE_BLOCKED = "CLOUDFLARE_BLOCKED"
+        private const val WEBVIEW_LOAD_FAILED = "WEBVIEW_LOAD_FAILED"
         private const val INTERCEPT_RESULT_URL = "https://kotatsu.intercept/result"
         private const val INTERCEPT_ERROR_URL = "https://kotatsu.intercept/error"
         private val INTERCEPT_URL_REGEX = Regex("https://kotatsu\\.intercept/.*", RegexOption.IGNORE_CASE)
         private const val CLOUDFLARE_MESSAGE =
-            "Cloudflare verification is required. Open Comix in the in-app browser, complete the check, then try again."
+            "Comix could not get past the Cloudflare check. Try again in a moment."
+        private const val WEBVIEW_LOAD_MESSAGE =
+            "Comix could not load the page in WebView. Open it in the browser and try again."
+        private const val WEBVIEW_CACHE_BUSTER_PARAM = "_kotatsu_retry"
+        private const val WEBVIEW_NAVIGATION_ATTEMPTS = 2
 
+        private const val CAUSE_CHAIN_LIMIT = 8
+        private const val MAIN_MODULE_SELECTOR = "script[type=module][src*=/dist/main-]"
+        private const val MAIN_MODULE_SELECTOR_JS = "'script[type=module][src*=\"/dist/main-\"]'"
+
+        // 100ms apart; only ever waits for the served HTML to be parsed.
+        private const val BUNDLE_WAIT_TICKS = 200
         private const val WEBVIEW_PAGE_ATTEMPTS = 3
         private const val WEBVIEW_PAGE_TIMEOUT = 20000L
 
-        // Collects the whole chapter list off the title page.
+        // Concurrent chapter-list requests once the page count is known.
+        private const val CHAPTER_API_CONCURRENCY = 6
+
+        // Recognises blocking documents from stable DOM markers rather than their
+        // localised titles. [evaluateWebViewApiJson] turns a Cloudflare result into
+        // a browser prompt; a Chromium network-error result gets one cache-busted
+        // retry first because a fresh WebView can fail its initial navigation.
+        private const val CLOUDFLARE_DETECT_JS = """
+                const isCloudflareChallenge = () => {
+                    try {
+                        return !!document.querySelector(
+                            '#challenge-form, #challenge-running, #challenge-error-title, #challenge-error-text, ' +
+                            '#cf-challenge-running, .cf-browser-verification, .cf-turnstile, ' +
+                            'form[action*="__cf_chl"], input[name="cf-turnstile-response"], ' +
+                            'script[src*="challenge-platform"], script[src*="turnstile"], ' +
+                            '[src*="challenges.cloudflare.com"]'
+                        );
+                    } catch (e) {
+                        return false;
+                    }
+                };
+                const isWebViewLoadError = () => {
+                    try {
+                        const uri = String(document.documentURI || '');
+                        return uri.indexOf('chrome-error://') === 0 || !!document.querySelector(
+                            '#main-frame-error, #error-information-popup-container, body.neterror'
+                        );
+                    } catch (e) {
+                        return false;
+                    }
+                };
+        """
+
+        // Collects the whole chapter list.
         //
-        // The script is injected once the page has finished loading, which is
-        // normally *after* the SPA has already fetched and parsed the first page
-        // of chapters — so hooking `JSON.parse`/`fetch`/XHR alone silently loses
-        // it. The rendered list is therefore the primary source (it is there no
-        // matter when we arrive) and the payload hooks only enrich the pages that
-        // are fetched later, while we walk the pager.
+        // Runs against the title page with the site's own module stripped out, so
+        // nothing renders and nothing is clicked. It pulls the signing bundle that
+        // module referenced, takes the api object out of it and asks the chapter
+        // endpoint directly, a hundred at a time.
         //
-        // There is no page or item limit: it keeps paging until the site says the
-        // list is complete, and only gives up if a page stops responding for
-        // [CHAPTER_STALL_MS].
-        //
-        // The result crosses back as a URL fragment, so it is emitted in a
-        // compact form — the shared URL prefix and the scanlation groups are sent
-        // once and referenced by index, and absent fields are omitted:
+        // The result crosses back as a URL fragment, so it is emitted in a compact
+        // form — the shared URL prefix and the scanlation groups are sent once and
+        // referenced by index, and absent fields are omitted:
         //   prefix  shared start of every chapter URL
         //   groups  [{ id?, name?, o }] — o = 1 when the group's release is official
         //   items   [{ i: id, n: number, u: url suffix, g: group index,
         //              v: volume?, t: name?, c: epoch seconds?, d: relative date? }]
-        private val CHAPTER_SCRIPT = """
+        private fun chapterScript(mangaId: String, knownEnvUrl: String) = """
             (async () => {
+$CLOUDFLARE_DETECT_JS
+                if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
+
+                const MANGA_ID = $mangaId;
+                // Reused from an earlier load when we have it: resolving it means
+                // downloading the whole main bundle to read one filename out of it.
+                const KNOWN_ENV_URL = $knownEnvUrl;
+                // Kotatsu refreshes the whole list, so there is no known chapter to
+                // stop at; the field is kept so the loop matches the site's own.
+                const LATEST_CHAPTER_ID = null;
+
                 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-                // A page turn is quick; only the initial render gets the full
-                // stall allowance.
-                const CLICK_TIMEOUT = 15000;
-                const byId = new Map();
-                const fromPayload = new Set();
 
-                // Waits for the page to do something, rather than against an
-                // overall budget: a long series may take as many pages as it
-                // takes, we only bail when nothing moves for a whole stall.
-                const waitFor = async (predicate, timeout) => {
-                    const until = Date.now() + (timeout || $CHAPTER_STALL_MS);
-                    while (Date.now() < until) {
-                        if (predicate()) return true;
-                        await sleep(100);
-                    }
-                    return false;
-                };
-
-                const text = (root, selector) => {
-                    const node = root.querySelector(selector);
-                    return node ? (node.textContent || '').trim() : '';
-                };
-                const number = (raw) => {
-                    const match = /(-?[0-9]+(?:\.[0-9]+)?)/.exec(String(raw || '').replace(/,/g, ''));
-                    return match ? Number(match[1]) : null;
-                };
-                const put = (chapter, isPayload) => {
-                    if (!chapter || chapter.id == null) return;
-                    const key = String(chapter.id);
-                    // Payload rows carry the exact number and a real timestamp,
-                    // so let them replace anything scraped for the same chapter.
-                    if (byId.has(key) && !(isPayload && !fromPayload.has(key))) return;
-                    byId.set(key, chapter);
-                    if (isPayload) fromPayload.add(key);
-                };
-
-                // --- Payload hooks: enrich pages fetched from here on. ---
-                const original = JSON.parse;
-                const isChapterList = (arr) =>
-                    Array.isArray(arr) && arr.length > 0 && arr[0] &&
-                    arr[0].id !== undefined && arr[0].number !== undefined &&
-                    arr[0].url !== undefined;
-                const takePayload = (parsed) => {
-                    try {
-                        const result = parsed && parsed.result ? parsed.result : parsed;
-                        const items = result && result.items;
-                        if (!isChapterList(items)) return;
-                        for (const ch of items) {
-                            const group = ch.group || null;
-                            put({
-                                id: ch.id,
-                                number: typeof ch.number === 'number' ? ch.number : number(ch.number),
-                                volume: typeof ch.volume === 'number' ? ch.volume : null,
-                                name: ch.name || null,
-                                url: ch.url || null,
-                                groupId: group && group.id != null ? group.id : null,
-                                groupName: group && group.name ? group.name :
-                                    (ch.isOfficial ? 'Official' : null),
-                                official: !!ch.isOfficial,
-                                createdAt: typeof ch.createdAt === 'number' ? ch.createdAt : null,
-                                date: ch.createdAtFormatted || null
-                            }, true);
+                try {
+                    let envUrl = KNOWN_ENV_URL;
+                    if (!envUrl) {
+                        // The module tag is in the served HTML, so this only ever waits
+                        // for the document to be parsed.
+                        let mainScript = null;
+                        for (let i = 0; i < $BUNDLE_WAIT_TICKS; i++) {
+                            if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                            if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
+                            mainScript = document.querySelector($MAIN_MODULE_SELECTOR_JS);
+                            if (mainScript && mainScript.src) break;
+                            await sleep(100);
                         }
-                    } catch (e) {}
-                };
-                JSON.parse = function () {
-                    const parsed = original.apply(this, arguments);
-                    takePayload(parsed);
-                    return parsed;
-                };
-                if (typeof window.fetch === 'function') {
-                    const originalFetch = window.fetch;
-                    window.fetch = function () {
-                        return originalFetch.apply(this, arguments).then((response) => {
-                            try {
-                                response.clone().text().then((body) => {
-                                    try { takePayload(original(body)); } catch (e) {}
-                                }).catch(() => {});
-                            } catch (e) {}
-                            return response;
-                        });
-                    };
-                }
-                const originalSend = XMLHttpRequest.prototype.send;
-                XMLHttpRequest.prototype.send = function () {
-                    this.addEventListener('load', function () {
-                        try { takePayload(original(this.responseText)); } catch (e) {}
+                        if (!mainScript || !mainScript.src) return null;
+
+                        const mainResponse = await fetch(mainScript.src);
+                        if (!mainResponse.ok) throw new Error('Could not load main bundle');
+                        const mainJavaScript = await mainResponse.text();
+                        const environmentFile = mainJavaScript.match(
+                            /from\s*["']\.\/(env-[^"']+\.js)["']/
+                        );
+                        if (!environmentFile) throw new Error('Could not find environment bundle');
+                        envUrl = new URL(environmentFile[1], mainScript.src).href;
+                    }
+
+                    // A bare import() in an injected script is parsed in the wrong
+                    // context; going through Function keeps it a real dynamic import.
+                    const importBundle = new Function('url', 'return import(url)');
+                    const environment = await importBundle(envUrl);
+                    const mangaApi = Object.values(environment).find((value) =>
+                        value &&
+                        typeof value === 'object' &&
+                        typeof value.chapters === 'function'
+                    );
+                    if (!mangaApi) throw new Error('Could not find manga API');
+
+                    const askFor = (page) => mangaApi.chapters(MANGA_ID, {
+                        page: page,
+                        limit: 100,
+                        order: { number: 'desc' }
                     });
-                    return originalSend.apply(this, arguments);
-                };
+                    const rowsOf = (response) => response && (response.items ||
+                        (response.result && response.result.items));
 
-                // --- The rendered list: always available, whatever our timing. ---
-                const scrape = () => {
-                    const rows = document.querySelectorAll('.mchap-list .mchap-item');
-                    for (const row of rows) {
-                        const link = row.querySelector('a.mchap-row__primary');
-                        const href = link ? link.getAttribute('href') : null;
-                        if (!href) continue;
-                        // The id leads the last path segment; matching it
-                        // anywhere would pick up a title slug that starts with
-                        // digits instead, collapsing every chapter into one.
-                        const slug = href.split('?')[0].split('/').filter(Boolean).pop() || '';
-                        const idMatch = /^(\d+)-/.exec(slug);
-                        if (!idMatch) continue;
-                        const groupLink = row.querySelector('a.mchap-row__group');
-                        const groupNode = groupLink || row.querySelector('.mchap-row__group');
-                        const groupId = groupLink
-                            ? /\/groups\/(\d+)/.exec(groupLink.getAttribute('href') || '')
-                            : null;
-                        const groupName = groupNode ? (groupNode.textContent || '').trim() : '';
-                        put({
-                            id: Number(idMatch[1]),
-                            number: number(text(row, '.mchap-row__ch')),
-                            volume: number(text(row, '.mchap-row__vol')),
-                            name: text(row, '.mchap-row__title') || null,
-                            url: href,
-                            groupId: groupId ? Number(groupId[1]) : null,
-                            groupName: groupName || null,
-                            official: !!(groupNode && groupNode.classList.contains('is-official')),
-                            createdAt: null,
-                            date: text(row, '.mchap-row__time') || null
-                        }, false);
-                    }
-                    return rows.length;
-                };
+                    const collected = [];
+                    const first = await askFor(1);
+                    const firstItems = rowsOf(first);
+                    if (!Array.isArray(firstItems)) throw new Error('Unexpected chapter response');
+                    collected.push(...firstItems);
 
-                // --- Walk the pager. ---
-                // `.mchap-foot__hint` reads "Showing 21 to 40 of 300 items", so it
-                // is both the progress marker and the signal that a click landed.
-                const hint = () => text(document, '.mchap-foot__hint');
-                const isComplete = () => {
-                    const match = /Showing\s+[\d,]+\s+to\s+([\d,]+)\s+of\s+([\d,]+)/i.exec(hint());
-                    if (!match) return false;
-                    return Number(match[1].replace(/,/g, '')) >= Number(match[2].replace(/,/g, ''));
-                };
-                const currentPage = () => {
-                    const active = document.querySelector('.mchap-foot .npager button.npager__num.is-active');
-                    const marked = active ? Number((active.textContent || '').trim()) : NaN;
-                    if (marked > 0) return marked;
-                    const match = /Showing\s+([\d,]+)\s+to\s+([\d,]+)/i.exec(hint());
-                    if (!match) return 1;
-                    const from = Number(match[1].replace(/,/g, ''));
-                    const to = Number(match[2].replace(/,/g, ''));
-                    const size = to - from + 1;
-                    return size > 0 ? Math.floor((from - 1) / size) + 1 : 1;
-                };
+                    // The first response says how many pages there are, so the rest do
+                    // not have to be discovered one at a time: they go out together and
+                    // the list arrives in two round trips instead of one per hundred.
+                    const meta = first.meta || first.pagination || {};
+                    const lastPage = Math.min(
+                        meta.lastPage || meta.last_page || 1,
+                        $MAX_CHAPTER_API_PAGES
+                    );
+                    const reachedKnown = firstItems.some((item) => item.id === LATEST_CHAPTER_ID);
 
-                /**
-                 * The pager only draws its Next arrow while the numeric window
-                 * has not yet reached the final page, so Next is already gone on
-                 * the second-to-last page — and on every series short enough to
-                 * fit the whole window, it never appears at all. The numbered
-                 * button for the following page is always on screen though, so
-                 * paging by number is what actually reaches the end.
-                 */
-                const nextButton = () => {
-                    const buttons = document.querySelectorAll('.mchap-foot .npager button');
-                    const wanted = currentPage() + 1;
-                    for (const button of buttons) {
-                        if (button.disabled) continue;
-                        if (Number((button.textContent || '').trim()) === wanted) return button;
-                    }
-                    for (const button of buttons) {
-                        if (button.disabled) continue;
-                        const label = button.getAttribute('aria-label') || '';
-                        if (/next/i.test(label)) return button;
-                    }
-                    return null;
-                };
-                const firstButton = () => {
-                    const buttons = document.querySelectorAll('.mchap-foot .npager button');
-                    for (const button of buttons) {
-                        if (button.disabled) continue;
-                        const label = button.getAttribute('aria-label') || '';
-                        if (/first/i.test(label)) return button;
-                    }
-                    return null;
-                };
-                const total = () => {
-                    const match = /of\s+([\d,]+)\s+items/i.exec(hint());
-                    return match ? Number(match[1].replace(/,/g, '')) : 0;
-                };
-                const isEmptyState = () => !!document.querySelector('.mpage__chapters .uempty');
-                const hasRows = () => !!document.querySelector('.mchap-list .mchap-item');
-
-                // Identifies which rows are on screen, so a page is only read
-                // once it has stopped changing — scraping the instant the first
-                // row appears can catch a half-rendered list.
-                const rowSignature = () => {
-                    const rows = document.querySelectorAll('.mchap-list .mchap-item a.mchap-row__primary');
-                    let signature = rows.length + ':';
-                    for (const row of rows) signature += (row.getAttribute('href') || '') + ',';
-                    return signature;
-                };
-                const settle = async () => {
-                    let previous = null;
-                    for (let i = 0; i < 100; i++) {
-                        const current = rowSignature();
-                        if (previous !== null && current === previous) return;
-                        previous = current;
-                        await sleep(100);
-                    }
-                };
-
-                const walk = async () => {
-                    while (!isComplete()) {
-                        const button = nextButton();
-                        if (!button) break;
-                        const before = hint();
-                        // Read the page being left as well, so a click that
-                        // lands late cannot cost the rows already on screen.
-                        scrape();
-                        button.click();
-                        // A click that does not register would otherwise cost a
-                        // whole page, so give it one more go before bailing out.
-                        if (!await waitFor(() => hint() !== before, CLICK_TIMEOUT)) {
-                            const retry = nextButton();
-                            if (!retry) break;
-                            retry.click();
-                            if (!await waitFor(() => hint() !== before, CLICK_TIMEOUT)) break;
+                    if (!reachedKnown && firstItems.length > 0 && lastPage > 1) {
+                        let nextPage = 2;
+                        const worker = async () => {
+                            for (;;) {
+                                const page = nextPage++;
+                                if (page > lastPage) return;
+                                const items = rowsOf(await askFor(page));
+                                if (Array.isArray(items)) collected.push(...items);
+                            }
+                        };
+                        await Promise.all(
+                            Array.from(
+                                { length: Math.min($CHAPTER_API_CONCURRENCY, lastPage - 1) },
+                                worker
+                            )
+                        );
+                    } else if (!reachedKnown && meta.hasNext) {
+                        // No page count to fan out over, so walk it the slow way.
+                        let page = 2;
+                        while (page <= $MAX_CHAPTER_API_PAGES) {
+                            const response = await askFor(page);
+                            const items = rowsOf(response);
+                            if (!Array.isArray(items) || items.length === 0) break;
+                            collected.push(...items);
+                            if (items.some((item) => item.id === LATEST_CHAPTER_ID)) break;
+                            const pageMeta = response.meta || response.pagination || {};
+                            if (!pageMeta.hasNext) break;
+                            page++;
                         }
-                        await settle();
-                        scrape();
                     }
-                };
 
-                await waitFor(() => hasRows() || isEmptyState());
-                await settle();
-                scrape();
-                await walk();
-
-                // The site reports how many chapters exist, so a short result
-                // means a click never landed and a whole page was skipped.
-                // Rewinding and walking once more recovers it.
-                const expected = total();
-                if (expected > 0 && byId.size < expected) {
-                    const first = firstButton();
-                    if (first) {
-                        first.click();
-                        await waitFor(() => /Showing\s+1\s+to/i.test(hint()));
-                        await settle();
-                        scrape();
-                        await walk();
+                    // --- Compact the result for the fragment-URL trip back. ---
+                    let prefix = collected.length ? String(collected[0].url || '') : '';
+                    for (const chapter of collected) {
+                        const url = String(chapter.url || '');
+                        let i = 0;
+                        while (i < prefix.length && i < url.length && prefix[i] === url[i]) i++;
+                        prefix = prefix.slice(0, i);
                     }
+
+                    const groups = [];
+                    const groupIndex = new Map();
+                    const items = collected.map((chapter) => {
+                        const group = chapter.group || null;
+                        const official = chapter.isOfficial ? 1 : 0;
+                        const groupId = group && group.id != null ? group.id : null;
+                        const groupName = group && group.name
+                            ? group.name
+                            : (official ? 'Official' : null);
+                        const key = (groupId != null ? 'i' + groupId : 'n' + (groupName || '')) +
+                            '|' + official;
+                        let g = groupIndex.get(key);
+                        if (g === undefined) {
+                            g = groups.length;
+                            groupIndex.set(key, g);
+                            const entry = { o: official };
+                            if (groupId != null) entry.id = groupId;
+                            if (groupName) entry.name = groupName;
+                            groups.push(entry);
+                        }
+                        const row = {
+                            i: chapter.id,
+                            n: typeof chapter.number === 'number'
+                                ? chapter.number
+                                : Number(chapter.number) || 0,
+                            u: String(chapter.url || '').slice(prefix.length),
+                            g: g
+                        };
+                        if (chapter.volume != null) row.v = chapter.volume;
+                        if (chapter.name) row.t = chapter.name;
+                        if (typeof chapter.createdAt === 'number') row.c = chapter.createdAt;
+                        else if (chapter.createdAtFormatted) row.d = chapter.createdAtFormatted;
+                        return row;
+                    });
+
+                    return JSON.stringify({
+                        prefix: prefix,
+                        groups: groups,
+                        items: items,
+                        empty: items.length === 0,
+                        env: envUrl
+                    });
+                } catch (error) {
+                    return JSON.stringify({
+                        error: String((error && error.message) || error)
+                    });
                 }
-
-                // --- Compact the result for the fragment-URL trip back. ---
-                const collected = [...byId.values()];
-                let prefix = collected.length ? String(collected[0].url || '') : '';
-                for (const chapter of collected) {
-                    const url = String(chapter.url || '');
-                    let i = 0;
-                    while (i < prefix.length && i < url.length && prefix[i] === url[i]) i++;
-                    prefix = prefix.slice(0, i);
-                }
-
-                const groups = [];
-                const groupIndex = new Map();
-                const items = collected.map((chapter) => {
-                    const official = chapter.official ? 1 : 0;
-                    const key = (chapter.groupId != null ? 'i' + chapter.groupId : 'n' + (chapter.groupName || '')) +
-                        '|' + official;
-                    let g = groupIndex.get(key);
-                    if (g === undefined) {
-                        g = groups.length;
-                        groupIndex.set(key, g);
-                        const entry = { o: official };
-                        if (chapter.groupId != null) entry.id = chapter.groupId;
-                        if (chapter.groupName) entry.name = chapter.groupName;
-                        groups.push(entry);
-                    }
-                    const row = {
-                        i: chapter.id,
-                        n: chapter.number,
-                        u: String(chapter.url || '').slice(prefix.length),
-                        g: g
-                    };
-                    if (chapter.volume != null) row.v = chapter.volume;
-                    if (chapter.name) row.t = chapter.name;
-                    if (chapter.createdAt != null) row.c = chapter.createdAt;
-                    else if (chapter.date) row.d = chapter.date;
-                    return row;
-                });
-
-                return JSON.stringify({
-                    prefix: prefix,
-                    groups: groups,
-                    items: items,
-                    empty: items.length === 0 && isEmptyState()
-                });
             })()
         """
 
@@ -1178,18 +1295,60 @@ internal class Comix(context: MangaLoaderContext) :
         // JS, so we hook `JSON.parse` (catches the decrypted object), `fetch` and
         // `XMLHttpRequest` (catch plain responses), plus poll `script#initial-data`
         // as a backstop. Resolves with the first `{ result: { items: [...] } }`
-        // payload as a JSON string for the bridge to hand back.
+        // payload as a compact JSON string for the bridge to hand back. Browse
+        // responses include many fields the listing never consumes, especially
+        // dozens of translated alternate titles per item; carrying those through
+        // a WebView navigation and then into Manga objects causes avoidable delay.
         private const val BROWSE_CAPTURE_SCRIPT = """
             (async () => {
                 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+$CLOUDFLARE_DETECT_JS
+                if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
                 const original = JSON.parse;
                 let captured = null;
+                const compactNamedItems = (values) => {
+                    if (!Array.isArray(values)) return undefined;
+                    return values.map((value) => {
+                        if (!value || typeof value !== 'object') return null;
+                        const item = {};
+                        if (value.id != null) item.id = value.id;
+                        if (value.title) item.title = value.title;
+                        else if (value.name) item.name = value.name;
+                        return item;
+                    }).filter((value) => value && (value.title || value.name));
+                };
+                const compactItem = (item) => {
+                    const result = {
+                        hid: item.hid || item.hash_id || '',
+                        title: item.title || ''
+                    };
+                    if (item.synopsis) result.synopsis = item.synopsis;
+                    if (item.status) result.status = item.status;
+                    if (item.contentRating) result.contentRating = item.contentRating;
+                    if (item.ratedAvg != null) result.ratedAvg = item.ratedAvg;
+                    else if (item.rated_avg != null) result.rated_avg = item.rated_avg;
+                    if (item.poster && typeof item.poster === 'object') {
+                        result.poster = {};
+                        if (item.poster.large) result.poster.large = item.poster.large;
+                        if (item.poster.medium) result.poster.medium = item.poster.medium;
+                        if (item.poster.small) result.poster.small = item.poster.small;
+                    }
+                    const termKeys = ['genres', 'genre', 'tags', 'theme', 'demographics', 'demographic', 'formats'];
+                    for (const key of termKeys) {
+                        const values = compactNamedItems(item[key]);
+                        if (values && values.length) result[key] = values;
+                    }
+                    const authors = compactNamedItems(item.authors || item.author);
+                    if (authors && authors.length) result.authors = authors;
+                    return result;
+                };
                 const take = (obj) => {
                     if (captured) return true;
                     try {
                         const items = obj && obj.result && obj.result.items;
                         if (Array.isArray(items) && items.length > 0) {
-                            captured = JSON.stringify(obj);
+                            captured = JSON.stringify({ result: { items: items.map(compactItem) } });
                             return true;
                         }
                     } catch (e) {}
@@ -1220,8 +1379,10 @@ internal class Comix(context: MangaLoaderContext) :
                     });
                     return originalSend.apply(this, arguments);
                 };
-                for (let i = 0; i < 200; i++) {
+                for (let i = 0; i < 300; i++) {
                     if (captured) return captured;
+                    if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                    if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
                     try {
                         const node = document.querySelector('script#initial-data');
                         if (node && node.textContent) {
@@ -1233,7 +1394,7 @@ internal class Comix(context: MangaLoaderContext) :
                             }
                         }
                     } catch (e) {}
-                    await sleep(150);
+                    await sleep(100);
                 }
                 return JSON.stringify({ error: 'no browse data captured' });
             })()
@@ -1244,6 +1405,9 @@ internal class Comix(context: MangaLoaderContext) :
         private const val PAGE_CAPTURE_SCRIPT = """
             (async () => {
                 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+$CLOUDFLARE_DETECT_JS
+                if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
                 const original = JSON.parse;
                 let captured = null;
                 const take = (obj) => {
@@ -1282,8 +1446,10 @@ internal class Comix(context: MangaLoaderContext) :
                     });
                     return originalSend.apply(this, arguments);
                 };
-                for (let i = 0; i < 200; i++) {
+                for (let i = 0; i < 300; i++) {
                     if (captured) return captured;
+                    if (isWebViewLoadError()) return '$WEBVIEW_LOAD_FAILED';
+                    if (isCloudflareChallenge()) return '$CLOUDFLARE_BLOCKED';
                     try {
                         const node = document.querySelector('script#initial-data');
                         if (node && node.textContent) {
@@ -1293,7 +1459,7 @@ internal class Comix(context: MangaLoaderContext) :
                             }
                         }
                     } catch (e) {}
-                    await sleep(150);
+                    await sleep(100);
                 }
                 return JSON.stringify({ error: 'no page data captured' });
             })()

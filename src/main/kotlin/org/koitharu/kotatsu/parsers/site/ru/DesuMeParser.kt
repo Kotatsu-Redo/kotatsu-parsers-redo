@@ -4,7 +4,7 @@ import androidx.collection.ArrayMap
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -15,6 +15,7 @@ import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.network.UserAgents
 import org.koitharu.kotatsu.parsers.util.*
+import org.koitharu.kotatsu.parsers.util.json.*
 import org.koitharu.kotatsu.parsers.util.suspendlazy.getOrNull
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import java.util.*
@@ -23,15 +24,7 @@ import java.util.*
 internal class DesuMeParser(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.DESUME, pageSize = 24, searchPageSize = 20) {
 
-    override val configKeyDomain = ConfigKey.Domain(
-        "desu.uno",
-        "x.desu.city",
-        "" +
-            "desu.city",
-        "desu.work",
-        "desu.store",
-        "desu.win",
-    )
+    override val configKeyDomain = ConfigKey.Domain("desu.uno")
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
@@ -82,33 +75,53 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     }
 
     override suspend fun getDetails(manga: Manga): Manga {
-        val storedUrl = manga.url.findGroupValue(LEGACY_MANGA_URL_REGEX)?.let { "/manga/$it/" } ?: manga.url
-        val doc = webClient.httpGet(storedUrl.toAbsoluteUrl(domain)).parseHtml()
-        val publicUrl = doc.selectFirst("#animeView > link[itemprop=url]")
-            ?.attrAsAbsoluteUrlOrNull("href") ?: storedUrl.toAbsoluteUrl(domain)
+        val mangaId = manga.url.findGroupValue(MANGA_ID_REGEX)
+            ?: manga.url.findGroupValue(LEGACY_MANGA_URL_REGEX)
+            ?: throw ParseException("Cannot obtain manga id", manga.url)
+        val json = webClient.httpGet("/api/manga/$mangaId/".toAbsoluteUrl(domain))
+            .parseJson().getJSONObject("manga")
+        val chapters = webClient.httpGet("/api/manga/$mangaId/chapters".toAbsoluteUrl(domain))
+            .parseJson().getJSONArray("chapters")
+        val url = json.getStringOrNull("view_url")?.toHttpUrl()?.encodedPath ?: manga.url
+        val cover = json.optJSONObject("cover")?.getStringOrNull("preview")
         return manga.copy(
-            url = publicUrl.toRelativeUrl(domain),
-            publicUrl = publicUrl,
-            largeCoverUrl = doc.selectFirst("meta[property=og:image]")
-                ?.attrAsAbsoluteUrlOrNull("content") ?: manga.largeCoverUrl,
-            tags = doc.select(".b-entry-info a[itemprop=genre]").mapNotNullToSet { element ->
-                val key = element.attr("href").substringAfter("genres=", "").takeIf(String::isNotEmpty)
-                    ?: return@mapNotNullToSet null
-                MangaTag(key, element.text().removePrefix("#").trim(), manga.source)
+            url = url,
+            publicUrl = url.toAbsoluteUrl(domain),
+            coverUrl = cover ?: manga.coverUrl,
+            largeCoverUrl = cover?.replace("/covers/preview/", "/covers/original/") ?: manga.largeCoverUrl,
+            altTitles = manga.altTitles +
+                setOfNotNull(json.getStringOrNull("name")?.takeIf { it != manga.title }) +
+                json.optJSONArray("synonyms")?.toStringSet().orEmpty(),
+            rating = json.optJSONObject("score")?.getFloatOrDefault("value", 0f)
+                ?.takeIf { it > 0f }?.div(10f) ?: manga.rating,
+            state = parseState(json.getStringOrNull("status"), json.getStringOrNull("trans_status")),
+            contentRating = when (json.getStringOrNull("content_rating")) {
+                "18+", "18_plus" -> ContentRating.ADULT
+                "16+", "16_plus", "17+", "17_plus" -> ContentRating.SUGGESTIVE
+                null, "unrated" -> null
+                else -> ContentRating.SAFE
             },
-            description = doc.selectFirst("#description .russian")?.textOrNull(),
-            chapters = doc.select(".chlist > li").mapChapters(reversed = true) { _, item ->
-                val link = item.selectFirst("h4 > a[href]") ?: return@mapChapters null
-                val url = link.attrAsAbsoluteUrl("href").toRelativeUrl(domain)
-                MangaChapter(
-                    id = item.selectFirst("[data-chapters_id]")?.attr("data-chapters_id")
-                        ?.toLongOrNull()?.let(::generateUid) ?: generateUid(url),
+            authors = json.optJSONArray("authors")?.mapJSONNotNullToSet { it.getStringOrNull("name") }.orEmpty(),
+            tags = json.optJSONArray("genres")?.mapJSONNotNullToSet { jo ->
+                val slug = jo.getStringOrNull("slug") ?: return@mapJSONNotNullToSet null
+                MangaTag(
+                    key = "${jo.getInt("genre_id")}-$slug",
+                    title = (jo.getStringOrNull("name") ?: slug).toTitleCase(),
                     source = manga.source,
-                    url = url,
-                    uploadDate = 0L,
-                    title = link.attrOrNull("title"),
-                    volume = url.findGroupValue(VOLUME_REGEX)?.toIntOrNull() ?: 0,
-                    number = url.findGroupValue(CHAPTER_REGEX)?.replace(',', '.')?.toFloatOrNull() ?: 0f,
+                )
+            }.orEmpty(),
+            description = json.getStringOrNull("description"),
+            chapters = chapters.mapChapters(reversed = true) { _, jo ->
+                val chapterUrl = jo.getStringOrNull("view_url")?.toHttpUrl()?.encodedPath
+                    ?: return@mapChapters null
+                MangaChapter(
+                    id = generateUid(jo.getLong("id")),
+                    source = manga.source,
+                    url = chapterUrl,
+                    uploadDate = jo.getLongOrDefault("publish_date", 0L) * 1000L,
+                    title = jo.getStringOrNull("title"),
+                    volume = jo.getStringOrNull("volume")?.toIntOrNull() ?: 0,
+                    number = jo.getStringOrNull("number")?.replace(',', '.')?.toFloatOrNull() ?: 0f,
                     scanlator = null,
                     branch = null,
                 )
@@ -119,16 +132,17 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val fullUrl = chapter.url.toAbsoluteUrl(domain)
         val script = webClient.httpGet(fullUrl).parseHtml().select("script").firstNotNullOfOrNull { element ->
-            element.data().takeIf { "Reader.init" in it }
+            element.data().takeIf { READER_CONFIG_KEY in it }
         } ?: throw ParseException("Reader configuration not found", fullUrl)
-        val directory = script.findGroupValue(READER_DIRECTORY_REGEX)?.toAbsoluteUrl(domain)
-            ?: throw ParseException("Reader image directory not found", fullUrl)
-        val images = JSONArray(
-            script.findGroupValue(READER_IMAGES_REGEX)
-                ?: throw ParseException("Reader images not found", fullUrl),
+        val config = JSONObject(
+            script.findGroupValue(READER_CONFIG_REGEX)
+                ?: throw ParseException("Reader configuration not found", fullUrl),
         )
-        return List(images.length()) { index ->
-            val url = concatUrl(directory, images.getJSONArray(index).getString(0))
+        val apiUrl = config.getString("apiBaseUrl") + "/chapters/" + config.getJSONObject("chapter").getLong("id")
+        val pages = webClient.httpGet(apiUrl.toAbsoluteUrl(domain))
+            .parseJson().getJSONObject("chapter").getJSONArray("pages")
+        return pages.mapJSON { jo ->
+            val url = jo.getString("url")
             MangaPage(
                 id = generateUid(url),
                 preview = null,
@@ -183,29 +197,47 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     }
 
     private fun parseSearch(doc: Document): List<Manga> {
-        val row = doc.select("#acpQuickSearch tr").firstOrNull {
-            it.selectFirst("th")?.text() == "Манга"
-        } ?: return emptyList()
-        return row.select("td li > a[href]").mapNotNull { link ->
+        val root = doc.selectFirst("ul.AniMangaSearchList[data-search-content-type=manga]") ?: return emptyList()
+        return root.select("li.AniMangaSearchCard").mapNotNull { item ->
+            val link = item.selectFirst("a.AniMangaSearchCard__link[href]") ?: return@mapNotNull null
             val publicUrl = link.attrAsAbsoluteUrl("href")
             val url = publicUrl.toRelativeUrl(domain)
             val mangaId = url.findGroupValue(MANGA_ID_REGEX)?.toLongOrNull() ?: return@mapNotNull null
-            val originalTitle = link.selectFirst(".itemTitle")?.text().orEmpty()
-            val title = link.selectFirst(".itemSubTitle")?.text().orEmpty().ifBlank { originalTitle }
+            val originalTitle = item.selectFirst(".AniMangaSearchCard__subtitle")?.textOrNull()
+            val title = item.selectFirst(".AniMangaSearchCard__title")?.textOrNull()
+                ?: originalTitle ?: return@mapNotNull null
             Manga(
                 url = url,
                 publicUrl = publicUrl,
                 source = source,
                 title = title,
-                altTitles = setOfNotNull(originalTitle.takeIf { it != title }),
-                coverUrl = link.selectFirst("img")?.src(),
-                state = null,
-                rating = RATING_UNKNOWN,
+                altTitles = setOfNotNull(originalTitle?.takeIf { it != title }),
+                coverUrl = item.selectFirst(".AniMangaSearchCard__cover")?.src(),
+                state = when {
+                    item.selectFirst(".AniMangaSearchCard__tag.released") != null -> MangaState.FINISHED
+                    item.selectFirst(".AniMangaSearchCard__tag.ongoing") != null -> MangaState.ONGOING
+                    else -> null
+                },
+                rating = item.selectFirst(".AniMangaSearchCard__facts .is-score")?.text()
+                    ?.replace(',', '.')?.toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN,
                 id = generateUid(mangaId),
                 contentRating = null,
                 tags = emptySet(),
                 authors = emptySet(),
             )
+        }
+    }
+
+    private fun parseState(status: String?, transStatus: String?) = when (status) {
+        "ongoing" -> MangaState.ONGOING
+        "released" -> MangaState.FINISHED
+        "anons" -> MangaState.UPCOMING
+        "discontinued" -> MangaState.ABANDONED
+        "paused" -> MangaState.PAUSED
+        else -> when (transStatus) {
+            "continued" -> MangaState.ONGOING
+            "completed" -> MangaState.FINISHED
+            else -> null
         }
     }
 
@@ -251,11 +283,11 @@ internal class DesuMeParser(context: MangaLoaderContext) :
     private companion object {
         val MANGA_ID_REGEX = Regex("""\.(\d+)/?$""")
         val LEGACY_MANGA_URL_REGEX = Regex("""/manga/api/(\d+)/?$""")
-        val VOLUME_REGEX = Regex("""/vol(\d+)/""")
-        val CHAPTER_REGEX = Regex("""/ch([\d.,]+)/""")
-        val READER_DIRECTORY_REGEX = Regex("""dir:\s*["']([^"']+)["']""")
-        val READER_IMAGES_REGEX = Regex(
-            """images:\s*(\[\[.*?]])\s*,\s*page:""",
+        const val READER_CONFIG_KEY = "window.MangaReader"
+        // Both braces must be escaped: Android's ICU engine rejects a bare `}` as a
+        // syntax error, even though the JVM accepts it.
+        val READER_CONFIG_REGEX = Regex(
+            """window\.MangaReader\s*=\s*(\{.*?\})\s*;""",
             RegexOption.DOT_MATCHES_ALL,
         )
     }

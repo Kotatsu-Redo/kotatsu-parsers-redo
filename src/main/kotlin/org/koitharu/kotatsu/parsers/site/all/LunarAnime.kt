@@ -49,14 +49,13 @@ import java.util.TimeZone
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlin.experimental.xor
 import kotlin.random.Random
 
 @MangaSourceParser("LUNARANIME", "Lunar Manga")
 internal class LunarAnime(context: MangaLoaderContext) :
-	PagedMangaParser(context, MangaParserSource.LUNARANIME, pageSize = 30) {
+	PagedMangaParser(context, MangaParserSource.LUNARANIME, pageSize = 30, searchPageSize = SEARCH_PAGE_SIZE) {
 
-	override val configKeyDomain = org.koitharu.kotatsu.parsers.config.ConfigKey.Domain("lunaranime.ru")
+	override val configKeyDomain = org.koitharu.kotatsu.parsers.config.ConfigKey.Domain("lunarx.to")
 
 	override val defaultSortOrder: SortOrder = SortOrder.UPDATED
 
@@ -165,9 +164,10 @@ internal class LunarAnime(context: MangaLoaderContext) :
 	}
 
 	private suspend fun search(page: Int, filter: MangaListFilter): List<Manga> {
+		val limit = if (filter.query.isNullOrBlank()) pageSize else SEARCH_PAGE_SIZE
 		val url = "$apiBaseUrl/api/manga/search".toHttpUrl().newBuilder()
 			.addQueryParameter("page", page.toString())
-			.addQueryParameter("limit", pageSize.toString())
+			.addQueryParameter("limit", limit.toString())
 
 		filter.query?.takeIf { it.isNotBlank() }?.let {
 			url.addQueryParameter("query", it)
@@ -215,21 +215,21 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		parseStringArray(json.optString("genres")).forEach { genre ->
 			tags += MangaTag(
 				key = genre,
-				title = genre,
+				title = formatTagTitle(genre),
 				source = source,
 			)
 		}
 		parseStringArray(json.optString("themes")).forEach { theme ->
 			tags += MangaTag(
 				key = theme,
-				title = theme,
+				title = formatTagTitle(theme),
 				source = source,
 			)
 		}
 		json.optString("demographic").nullIfEmpty()?.let { demographic ->
 			tags += MangaTag(
 				key = demographic,
-				title = demographic.replaceFirstChar { ch -> ch.titlecase(Locale.ROOT) },
+				title = formatTagTitle(demographic),
 				source = source,
 			)
 		}
@@ -301,6 +301,8 @@ internal class LunarAnime(context: MangaLoaderContext) :
 				branch = languageToTitle(language),
 				source = source,
 			)
+		}.distinctBy { chapter ->
+			Triple(chapter.branch, chapter.volume, chapter.number)
 		}
 	}
 
@@ -350,7 +352,7 @@ internal class LunarAnime(context: MangaLoaderContext) :
 				genres.forEach { genre ->
 					tags += MangaTag(
 						key = genre,
-						title = genre,
+						title = formatTagTitle(genre),
 						source = source,
 					)
 				}
@@ -359,7 +361,12 @@ internal class LunarAnime(context: MangaLoaderContext) :
 				break
 			}
 		}
-		return tags.sortedBy { it.title }.toCollection(LinkedHashSet())
+		return tags
+			.groupBy { it.title }
+			.values
+			.map { variants -> variants.firstOrNull { it.key == it.title } ?: variants.first() }
+			.sortedBy { it.title }
+			.toCollection(LinkedHashSet())
 	}
 
 	private suspend fun apiGetJson(url: String): JSONObject {
@@ -480,19 +487,14 @@ internal class LunarAnime(context: MangaLoaderContext) :
 	}
 
 	private suspend fun decryptChapterImages(chapterUrl: String, slug: String, chapterNum: String, lang: String): List<String> {
-		val seedObjs = getSeeds(chapterUrl)
-		require(seedObjs.size >= 2) { "Failed to find payload seeds" }
-
-		val rctx0 = generateRctxFrom(seedObjs[0])
-		val rctx1 = generateRctxFrom(seedObjs[1])
-		val token = generateToken(rctx0, rctx1, slug, chapterNum)
+		val (rctx0, rctx1) = getReaderContext(chapterUrl)
+		val (token, nonce) = generateToken(rctx0, rctx1, slug, chapterNum)
 		val sessionData = fetchSessionData(token, lang)
-		return decryptSessionImages(sessionData, rctx0)
+		return decryptSessionImages(sessionData, rctx0, nonce)
 	}
 
-	private suspend fun getSeeds(url: String): List<Map<String, String>> {
+	private suspend fun getReaderContext(url: String): Pair<String, String> {
 		val html = webClient.httpGet(url, getRequestHeaders()).parseRaw()
-		val seedObjects = mutableListOf<Map<String, String>>()
 		for (match in nextFPushRegex.findAll(html)) {
 			val segment = match.groupValues[1]
 			val decoded = segment.replace("\\\\", "\\").replace("\\\"", "\"")
@@ -500,16 +502,14 @@ internal class LunarAnime(context: MangaLoaderContext) :
 				val map = runCatching {
 					dictMatch.value.toStringMap()
 				}.getOrNull() ?: continue
-				if (map.keys.any { it.length == 2 }) {
-					seedObjects += map
-				}
+				decodeReaderContext(map)?.let { return it }
 			}
 		}
-		return seedObjects
+		error("Failed to find LunarX reader context")
 	}
 
 	private suspend fun fetchSessionData(token: String, lang: String): String {
-		val url = "$apiBaseUrl/api/manga/r/$token?lang=$lang"
+		val url = "$apiBaseUrl/api/manga/r/$token?language=$lang"
 		val root = apiGetJson(url)
 		return root.optJSONObject("data")
 			?.optString("session_data")
@@ -518,71 +518,154 @@ internal class LunarAnime(context: MangaLoaderContext) :
 			?: error("session_data is empty")
 	}
 
-	private fun generateRctxFrom(seedObj: Map<String, String>): String {
-		val (_, reversedB64) = seedObj.entries.first { it.key.length == 2 }.let { it.key to it.value.reversed() }
-		val parts = String(Base64.getDecoder().decode(reversedB64.padBase64()), Charsets.UTF_8).split('.')
-		val xorKey = parts[0].toInt(16)
-		val hexStr = parts.drop(1).joinToString("") { seedObj[it].orEmpty() }
-		val aStr = hexStr.chunked(2).mapIndexed { index, hex ->
-			((hex.toInt(16) xor ((xorKey + index * 7 + 3) and 0xFF)).toChar())
-		}.joinToString("")
-		if (aStr.isEmpty()) return ""
+	private fun decodeReaderContext(values: Map<String, String>): Pair<String, String>? {
+		for ((key, encoded) in values) {
+			val envelope = runCatching {
+				Base64.getDecoder().decode(encoded.reversed().padBase64())
+			}.getOrNull() ?: continue
+			var keyHash = 0
+			key.forEach { char ->
+				keyHash = (31 * keyHash + char.code) and 0xFF
+			}
+			val descriptorBytes = ByteArray(envelope.size) { index ->
+				((envelope[index].toInt() and 0xFF) xor ((keyHash + 37 * index) and 0xFF)).toByte()
+			}
+			val fields = String(descriptorBytes, Charsets.ISO_8859_1).split('|')
+			if (fields.size != 6 || fields[0] != "3") continue
+			val seed = fields[1].toIntOrNull(16) ?: continue
+			val multiplier = fields[2].toIntOrNull(16) ?: continue
+			val increment = fields[3].toIntOrNull(16) ?: continue
+			val encodedProgram = fields[4]
+			if (encodedProgram.isEmpty() || encodedProgram.length % 3 != 0) continue
+			val program = mutableListOf<Pair<Int, Int>>()
+			var validProgram = true
+			for (instruction in encodedProgram.chunked(3)) {
+				val operation = instruction[0].digitToIntOrNull(16)
+				val argument = instruction.substring(1).toIntOrNull(16)
+				if (operation == null || argument == null || operation > 7) {
+					validProgram = false
+					break
+				}
+				program += operation to argument
+			}
+			if (!validProgram) continue
+			val names = fields[5].split('.').filter { it.isNotEmpty() }
+			if (names.isEmpty()) continue
+			val hex = names.joinToString("") { values[it].orEmpty() }
+			if (hex.length < 2 || hex.length % 2 != 0) continue
 
-		val rand = Random(aStr.length.toLong())
-		val h = IntArray(256) { it }.apply {
-			for (i in 255 downTo 1) {
-				val j = rand.nextInt(i + 1)
-				this[i] = this[j].also { this[j] = this[i] }
+			val decoded = ByteArray(hex.length / 2)
+			var state = seed and 0xFF
+			var previous = 0
+			var validHex = true
+			for (index in decoded.indices) {
+				val input = hex.substring(index * 2, index * 2 + 2).toIntOrNull(16)
+				if (input == null) {
+					validHex = false
+					break
+				}
+				state = (state * multiplier + increment) and 0xFF
+				decoded[index] = reverseReaderByte(input xor previous, index, state, program).toByte()
+				previous = input
 			}
+			if (!validHex) continue
+			if (decoded.size < 7 ||
+				(decoded[0].toInt() and 0xFF) != 167 ||
+				(decoded[1].toInt() and 0xFF) != 62 ||
+				(decoded[2].toInt() and 0xFF) != 145
+			) {
+				continue
+			}
+			val firstLength = ((decoded[3].toInt() and 0xFF) shl 8) or (decoded[4].toInt() and 0xFF)
+			val secondLength = ((decoded[5].toInt() and 0xFF) shl 8) or (decoded[6].toInt() and 0xFF)
+			if (firstLength <= 0 || secondLength <= 0 || 7 + firstLength + secondLength > decoded.size) continue
+			val first = String(decoded, 7, firstLength, Charsets.ISO_8859_1)
+			val second = String(decoded, 7 + firstLength, secondLength, Charsets.ISO_8859_1)
+			return first to second
 		}
-		val s = IntArray(256) { value -> h.indexOf(value) }
-		val u = IntArray(aStr.length) { rand.nextInt(256) }
-		val d = aStr.map { it.code }.toMutableList()
-
-		repeat(3) { round ->
-			for (t in d.indices) {
-				d[t] = d[t] xor u[(t + 7 * round) % u.size]
-				d[t] = h[d[t]]
-				val shift = (t + 3 * round + 1) % 7 + 1
-				d[t] = ((d[t] shl shift) or (d[t] shr (8 - shift))) and 0xFF
-			}
-			for (t in 1 until d.size) {
-				d[t] = d[t] xor d[t - 1]
-			}
-		}
-
-		val e = d.toMutableList()
-		for (round in 2 downTo 0) {
-			for (t in e.size - 1 downTo 1) {
-				e[t] = e[t] xor e[t - 1]
-			}
-			for (t in e.indices) {
-				val shift = (t + 3 * round + 1) % 7 + 1
-				e[t] = ((e[t] shr shift) or (e[t] shl (8 - shift))) and 0xFF
-				e[t] = s[e[t]]
-				e[t] = e[t] xor u[(t + 7 * round) % u.size]
-			}
-		}
-		return e.joinToString("") { it.toChar().toString() }
+		return null
 	}
 
-	private fun generateToken(rctx0: String, rctx1: String, slug: String, index: String): String {
-		val xorKey = rctx0 xor rctx1
+	private fun reverseReaderByte(
+		input: Int,
+		index: Int,
+		state: Int,
+		program: List<Pair<Int, Int>>,
+	): Int {
+		var value = input and 0xFF
+		for ((operation, argument) in program.asReversed()) {
+			value = when (operation) {
+				0 -> value xor argument
+				1 -> value - argument
+				2 -> {
+					val shift = (argument and 7).takeUnless { it == 0 } ?: 1
+					(value ushr shift) or (value shl (8 - shift))
+				}
+				3 -> ((value and 0x0F) shl 4) or ((value and 0xFF) ushr 4)
+				4 -> value xor state
+				5 -> value xor ((index * (argument or 1) + argument) and 0xFF)
+				6 -> value.inv()
+				else -> argument - value
+			}
+			value = value and 0xFF
+		}
+		return value
+	}
+
+	private fun generateToken(
+		rctx0: String,
+		rctx1: String,
+		slug: String,
+		index: String,
+	): Pair<String, String> {
+		require(rctx0.isNotEmpty() && rctx1.isNotEmpty()) { "LunarX reader context is empty" }
+		val digest = "$rctx0\u0001$rctx1".sha256()
+		val key = ByteArray(maxOf(rctx0.length, rctx1.length)) { position ->
+			(
+				rctx0[position % rctx0.length].code xor
+					rctx1[position % rctx1.length].code xor
+					(digest[position % digest.size].toInt() and 0xFF) xor
+					((83 * position + 29) and 0xFF)
+			).toByte()
+		}
+		val nonce = randomString(12)
 		val timestamp = (System.currentTimeMillis() / 1000).toString(16)
-		val rand = (1..8).map { randAlphabet[Random.nextInt(randAlphabet.length)] }.joinToString("")
-		val payload = "$timestamp|$rand|$slug|$index"
-		val encrypted = payload.mapIndexed { i, char ->
-			(char.code xor xorKey[i % xorKey.size].toInt()).toByte()
-		}.toByteArray()
-		return base64UrlEncode(encrypted)
+		val suffix = randomString(6)
+		val payload = "$timestamp|$nonce|$slug|$index|$suffix"
+		val offset = Random.nextInt(256)
+		val encrypted = ByteArray(payload.length + 1)
+		encrypted[0] = offset.toByte()
+		for (position in payload.indices) {
+			encrypted[position + 1] = (
+				payload[position].code xor
+					(key[(position + offset) % key.size].toInt() and 0xFF) xor
+					((offset + 83 * position) and 0xFF)
+			).toByte()
+		}
+		return base64UrlEncode(encrypted) to nonce
 	}
 
-	private fun decryptSessionImages(sessionData: String, rctx0: String): List<String> {
-		val ciphertext = Base64.getUrlDecoder().decode(sessionData.padBase64())
-		val decrypted = Cipher.getInstance("AES/CBC/PKCS5Padding").run {
-			init(Cipher.DECRYPT_MODE, SecretKeySpec(rctx0.sha256(), "AES"), IvParameterSpec(ByteArray(16)))
-			String(doFinal(ciphertext), Charsets.UTF_8)
-		}.trim().trim('\u0000').replace("\\/", "/")
+	private fun decryptSessionImages(sessionData: String, rctx0: String, nonce: String): List<String> {
+		val ciphertext = runCatching {
+			Base64.getDecoder().decode(sessionData.padBase64())
+		}.recoverCatching {
+			Base64.getUrlDecoder().decode(sessionData.padBase64())
+		}.getOrThrow()
+		val thumbprint = deviceKeyThumbprint()
+		val keyInputs = buildList {
+			if (!thumbprint.isNullOrEmpty()) {
+				add("$rctx0\u0001$nonce\u0002$thumbprint")
+			}
+			add("$rctx0\u0001$nonce")
+		}
+		val decrypted = keyInputs.firstNotNullOfOrNull { keyInput ->
+			runCatching {
+				Cipher.getInstance("AES/CBC/PKCS5Padding").run {
+					init(Cipher.DECRYPT_MODE, SecretKeySpec(keyInput.sha256(), "AES"), IvParameterSpec(ByteArray(16)))
+					String(doFinal(ciphertext), Charsets.UTF_8)
+				}
+			}.getOrNull()?.takeIf { it.startsWith('{') || it.startsWith('[') }
+		}?.replace("\\/", "/") ?: error("Failed to decrypt LunarX chapter data")
 		val payload = parseDecryptedPayload(decrypted) ?: return emptyList()
 		return jsonArrayToStrings(
 			payload.optJSONObject("data")?.optJSONArray("images")
@@ -591,9 +674,16 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		)
 	}
 
-	private infix fun String.xor(other: String): ByteArray = ByteArray(maxOf(length, other.length)) { index ->
-		(this[index % length].code.toByte() xor other[index % other.length].code.toByte())
+	private fun deviceKeyThumbprint(): String? {
+		val jwk = keyPairJson?.optJSONObject("publicJwk") ?: return null
+		val x = jwk.optString("x").nullIfEmpty() ?: return null
+		val y = jwk.optString("y").nullIfEmpty() ?: return null
+		val canonical = """{"crv":"P-256","kty":"EC","x":"$x","y":"$y"}"""
+		return base64UrlEncode(canonical.sha256())
 	}
+
+	private fun randomString(length: Int): String =
+		(1..length).joinToString("") { randAlphabet[Random.nextInt(randAlphabet.length)].toString() }
 
 	private fun String.toStringMap(): Map<String, String> {
 		val json = JSONObject(this)
@@ -710,6 +800,9 @@ internal class LunarAnime(context: MangaLoaderContext) :
 		}
 	}
 
+	private fun formatTagTitle(value: String): String =
+		value.replaceFirstChar { char -> char.titlecase(Locale.ROOT) }
+
 	private fun languageToTitle(code: String): String {
 		return when (normalizeLanguageCode(code)) {
 			"bg" -> "Bulgarian"
@@ -735,8 +828,9 @@ internal class LunarAnime(context: MangaLoaderContext) :
 	private var dpopPrivateKey: PrivateKey? = null
 
 	private companion object {
-		private const val apiBaseUrl = "https://api.lunaranime.ru"
-		private const val CDN_HOST = "storage.lunaranime.ru"
+		private const val apiBaseUrl = "https://api.lunarx.to"
+		private const val CDN_HOST = "vault.lunarx.to"
+		private const val SEARCH_PAGE_SIZE = 100
 		private const val EXPORT_KEYS_JS = """
 			(function() {
 				try {

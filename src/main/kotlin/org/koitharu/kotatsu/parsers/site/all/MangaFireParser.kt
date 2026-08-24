@@ -38,6 +38,14 @@ internal abstract class MangaFireParser(
 
     override val configKeyDomain = ConfigKey.Domain("mangafire.to")
 
+    // [userAgentKey] defaults to the device's own user agent, which is what the site
+    // is served for anyway; registering it here is only what puts the row on the
+    // source's settings screen so it can be overridden.
+    override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
+        super.onCreateConfig(keys)
+        keys.add(userAgentKey)
+    }
+
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED, // chapter update
         SortOrder.POPULARITY, // most views
