@@ -401,60 +401,123 @@ internal abstract class OniSagaParser(
 		val state = document.extractLivewireState(CHAPTER_LIST_COMPONENT)
 		val visibleLanguages = document.select("a[href*='/read/']")
 			.mapNotNullTo(linkedSetOf()) { it.chapterLanguage() }
-		val selectedLanguage = state?.selectedChapterLanguage() ?: visibleLanguages.singleOrNull()
+		val selectedLanguage = state?.selectedChapterLanguage()
+			?: state?.activeChapterLanguage()
+			?: visibleLanguages.singleOrNull()
+			?: DEFAULT_CHAPTER_LANGUAGE
 		val requestedLanguage = languageCode
 		if (requestedLanguage != null) {
 			val initialChapters = parseChapters(
 				document = document,
 				language = requestedLanguage,
 				matchLanguage = selectedLanguage != requestedLanguage,
+				includeUnlabeled = selectedLanguage == requestedLanguage,
 			)
-			if (state == null || initialChapters.isNotEmpty() && !document.hasMoreChapters()) {
-				return initialChapters
-			}
+			if (state == null) return initialChapters
 			return runCatchingCancellable {
-				fetchChapterBatch(document.location(), state, requestedLanguage, initialChapters)
+				val selected = if (selectedLanguage == requestedLanguage) {
+					ChapterLoadResult(initialChapters, state, document.hasMoreChapters())
+				} else {
+					switchChapterLanguage(document.location(), state, requestedLanguage)
+						?: return@runCatchingCancellable initialChapters
+				}
+				fetchChapterBatch(
+					referer = document.location(),
+					initialState = selected.state,
+					code = requestedLanguage,
+					fallback = selected.chapters,
+					hasMore = selected.hasMore,
+				).chapters
 			}.getOrElse { initialChapters }
 		}
 
-		val fallbackLanguage = state?.activeChapterLanguage() ?: selectedLanguage ?: DEFAULT_CHAPTER_LANGUAGE
-		val initialByLanguage = LANGUAGE_CODES.associateWith { code ->
-			parseChapters(
-				document = document,
-				language = code,
-				matchLanguage = true,
-				includeUnlabeled = code == fallbackLanguage,
-			)
-		}
-		if (state == null) return normalizeChapters(initialByLanguage.values.flatten())
+		val initialChapters = parseChapters(
+			document = document,
+			language = selectedLanguage,
+			matchLanguage = true,
+			includeUnlabeled = true,
+		)
+		val initialState = state ?: return initialChapters
 		val chapters = ArrayList<MangaChapter>()
-		for (code in LANGUAGE_CODES) {
-			val fallback = initialByLanguage.getValue(code)
-			if (code == selectedLanguage && fallback.isNotEmpty() && !document.hasMoreChapters()) {
-				chapters += fallback
-				continue
+		var currentState = initialState
+		var currentLanguage = selectedLanguage
+		val languageOrder = buildList {
+			add(selectedLanguage)
+			addAll(LANGUAGE_CODES)
+		}.distinct()
+		for (code in languageOrder) {
+			val selected = if (code == currentLanguage) {
+				ChapterLoadResult(initialChapters, currentState, document.hasMoreChapters())
+			} else {
+				runCatchingCancellable {
+					switchChapterLanguage(document.location(), currentState, code)
+				}.getOrNull() ?: continue
 			}
-			chapters += runCatchingCancellable {
-				fetchChapterBatch(document.location(), state, code, fallback)
-			}.getOrElse { fallback }
+			currentState = selected.state
+			currentLanguage = code
+			if (selected.chapters.isEmpty()) continue
+			val loaded = runCatchingCancellable {
+				fetchChapterBatch(
+					referer = document.location(),
+					initialState = selected.state,
+					code = code,
+					fallback = selected.chapters,
+					hasMore = selected.hasMore,
+				)
+			}.getOrElse { selected }
+			currentState = loaded.state
+			chapters += loaded.chapters
 		}
 		return normalizeChapters(chapters)
 	}
 
 	private fun normalizeChapters(chapters: List<MangaChapter>): List<MangaChapter> = chapters
-		.distinctBy(MangaChapter::url)
+		.distinctBy { it.branch to it.number }
 		.groupBy(MangaChapter::branch)
 		.values
 		.sortedByDescending(List<MangaChapter>::size)
 		.flatMap { branch -> branch.sortedBy(MangaChapter::number) }
+
+	private suspend fun switchChapterLanguage(
+		referer: String,
+		state: LivewireState,
+		code: String,
+	): ChapterLoadResult? {
+		val response = livewireRequestLock.withLock {
+			webClient.httpPost(
+				"https://$domain/livewire/update".toHttpUrl(),
+				createLivewirePayload(
+					state = state,
+					updates = JSONObject().put("language", code),
+					method = "loadMoreChapters",
+					params = JSONArray(),
+					callCount = 0,
+				),
+				livewireHeaders(referer),
+			).parseJson()
+		}
+		val component = response.firstComponent() ?: return null
+		val nextSnapshot = component.getStringOrNull("snapshot") ?: return null
+		val nextState = LivewireState(nextSnapshot, state.token)
+		if (nextState.selectedChapterLanguage() != code) return null
+		val html = component.optJSONObject("effects")?.getStringOrNull("html") ?: return null
+		val chapterDocument = Jsoup.parseBodyFragment(html, "https://$domain")
+		return ChapterLoadResult(
+			chapters = parseChapters(chapterDocument, code),
+			state = nextState,
+			hasMore = chapterDocument.hasMoreChapters(),
+		)
+	}
 
 	private suspend fun fetchChapterBatch(
 		referer: String,
 		initialState: LivewireState,
 		code: String,
 		fallback: List<MangaChapter>,
-	): List<MangaChapter> {
-		var snapshot = initialState.snapshot
+		hasMore: Boolean,
+	): ChapterLoadResult {
+		if (!hasMore) return ChapterLoadResult(fallback, initialState, false)
+		var state = initialState
 		var previousSize = fallback.size
 		var chapters = fallback
 		repeat(MAX_CHAPTER_REQUESTS) { requestIndex ->
@@ -463,7 +526,7 @@ internal abstract class OniSagaParser(
 				webClient.httpPost(
 					"https://$domain/livewire/update".toHttpUrl(),
 					createLivewirePayload(
-						state = LivewireState(snapshot, initialState.token),
+						state = state,
 						updates = JSONObject().put("language", code),
 						method = "loadMoreChapters",
 						params = JSONArray(),
@@ -472,18 +535,23 @@ internal abstract class OniSagaParser(
 					livewireHeaders(referer),
 				).parseJson()
 			}
-			val component = response.firstComponent() ?: return chapters
-			val html = component.optJSONObject("effects")?.getStringOrNull("html") ?: return chapters
+			val component = response.firstComponent() ?: return ChapterLoadResult(chapters, state, true)
+			val html = component.optJSONObject("effects")?.getStringOrNull("html")
+				?: return ChapterLoadResult(chapters, state, true)
 			val chapterDocument = Jsoup.parseBodyFragment(html, "https://$domain")
-			val nextSnapshot = component.getStringOrNull("snapshot")
+			val nextState = component.getStringOrNull("snapshot")
+				?.let { LivewireState(it, initialState.token) }
+				?: return ChapterLoadResult(chapters, state, chapterDocument.hasMoreChapters())
 			val parsed = parseChapters(chapterDocument, code)
-			if (parsed.size <= previousSize) return chapters
+			if (parsed.size <= previousSize) {
+				return ChapterLoadResult(chapters, nextState, chapterDocument.hasMoreChapters())
+			}
 			chapters = parsed
 			previousSize = parsed.size
-			if (!chapterDocument.hasMoreChapters()) return chapters
-			snapshot = nextSnapshot ?: return chapters
+			state = nextState
+			if (!chapterDocument.hasMoreChapters()) return ChapterLoadResult(chapters, state, false)
 		}
-		return chapters
+		return ChapterLoadResult(chapters, state, true)
 	}
 
 	private fun parseChapters(
@@ -515,7 +583,6 @@ internal abstract class OniSagaParser(
 			val button = dropdown.selectFirst("button") ?: return@forEach
 			val number = button.chapterNumber() ?: return@forEach
 			val date = parseRelativeDate(button.chapterDateText())
-			var unknownIndex = 1
 			dropdown.select("ui-menu a[data-flux-menu-item]").forEach { link ->
 				val url = link.attrAsRelativeUrlOrNull("href")?.takeIf { "/read/" in it } ?: return@forEach
 				val chapterLanguage = link.chapterLanguage()
@@ -536,32 +603,24 @@ internal abstract class OniSagaParser(
 				} else {
 					groupText
 				}
-				val group = if (rawGroup.isEmpty() || rawGroup.equals("Unknown group", ignoreCase = true)) {
-					"Unknown ${unknownIndex++}"
-				} else {
-					rawGroup
-				}
+				val group = rawGroup
+					.takeUnless { it.isEmpty() || it.equals("Unknown group", ignoreCase = true) }
 				raw.add(RawChapter(number, url, date, group))
 			}
 		}
-		val hasGroups = raw.any { it.group != null }
-		return raw.groupBy { chapter ->
-			val group = if (hasGroups) chapter.group ?: DEFAULT_GROUP else null
-			if (languageCode == null) listOfNotNull(language, group).joinToString(" · ") else group
-		}.flatMap { (branch, items) ->
-			items.distinctBy(RawChapter::number).map { chapter ->
-				MangaChapter(
-					id = generateUid(chapter.url),
-					title = null,
-					number = chapter.number,
-					volume = 0,
-					url = chapter.url,
-					scanlator = chapter.group,
-					uploadDate = chapter.date,
-					branch = branch,
-					source = source,
-				)
-			}
+		val branch = language.takeIf { languageCode == null }
+		return raw.distinctBy(RawChapter::number).map { chapter ->
+			MangaChapter(
+				id = generateUid(if (branch == null) chapter.url else "$branch\n${chapter.url}"),
+				title = null,
+				number = chapter.number,
+				volume = 0,
+				url = chapter.url,
+				scanlator = chapter.group,
+				uploadDate = chapter.date,
+				branch = branch,
+				source = source,
+			)
 		}
 	}
 
@@ -1086,6 +1145,11 @@ internal abstract class OniSagaParser(
 	private data class CachedPageUrl(val url: String, val expiresAt: Long)
 	private data class ReaderState(val token: String, val orders: List<Int>)
 	private data class CachedReaderState(val state: ReaderState, val expiresAt: Long)
+	private data class ChapterLoadResult(
+		val chapters: List<MangaChapter>,
+		val state: LivewireState,
+		val hasMore: Boolean,
+	)
 	private data class RawChapter(val number: Float, val url: String, val date: Long, val group: String?)
 
 	private data class LivewireUpdates(
@@ -1206,7 +1270,6 @@ internal abstract class OniSagaParser(
 		const val IMAGE_REFERER_FRAGMENT = "onisaga-ref:"
 		const val POST_FILTER_COMPONENT = "post-filter"
 		const val CHAPTER_LIST_COMPONENT = "manga.chapter-list"
-		const val DEFAULT_GROUP = "Default"
 		const val DEFAULT_CHAPTER_LANGUAGE = "EN"
 		const val MINUTE_MILLIS = 60_000L
 		const val HOUR_MILLIS = 3_600_000L
