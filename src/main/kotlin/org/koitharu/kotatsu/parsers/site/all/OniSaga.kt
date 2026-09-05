@@ -413,14 +413,15 @@ internal abstract class OniSagaParser(
 			return parseChapters(document, branchName(activeLanguage, languages))
 		}
 		if (requestedLanguage != null) {
+			val expected = languages[requestedLanguage]?.total ?: 0
 			val start = if (requestedLanguage == activeLanguage) {
 				ChapterLoadResult(parseChapters(document, null), state, document.hasMoreChapters())
 			} else {
 				runCatchingCancellable {
-					switchChapterLanguage(referer, state, requestedLanguage, null)
+					switchChapterLanguage(referer, state, requestedLanguage, null, loadCallCount(expected, CHAPTERS_PER_LOAD))
 				}.getOrNull() ?: return emptyList()
 			}
-			val chapters = runCatchingCancellable { fetchChapterBatch(referer, start, null) }
+			val chapters = runCatchingCancellable { fetchChapterBatch(referer, start, null, expected) }
 				.getOrElse { start }
 				.chapters
 			return normalizeChapters(chapters)
@@ -432,26 +433,36 @@ internal abstract class OniSagaParser(
 		val chapters = ArrayList<MangaChapter>()
 		for (code in codes) {
 			val branch = branchName(code, languages)
+			val expected = languages[code]?.total ?: 0
 			val start = if (code == activeLanguage) {
 				ChapterLoadResult(parseChapters(document, branch), state, document.hasMoreChapters())
 			} else {
 				// setLanguage resets the feed, so every language starts from the untouched snapshot.
 				runCatchingCancellable {
-					switchChapterLanguage(referer, state, code, branch)
+					switchChapterLanguage(referer, state, code, branch, loadCallCount(expected, CHAPTERS_PER_LOAD))
 				}.getOrNull() ?: continue
 			}
 			if (start.chapters.isEmpty()) continue
 			chapters += runCatchingCancellable {
-				fetchChapterBatch(referer, start, branch)
+				fetchChapterBatch(referer, start, branch, expected)
 			}.getOrElse { start }.chapters
 		}
 		return normalizeChapters(chapters)
 	}
 
-	private fun branchName(code: String, languages: Map<String, String>): String? = if (languageCode != null) {
+	private fun branchName(code: String, languages: Map<String, ChapterLanguage>): String? = if (languageCode != null) {
 		null
 	} else {
-		languages[code] ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT)
+		languages[code]?.label ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT)
+	}
+
+	// Every response re-renders the whole feed, so asking past what the picker says exists just re-downloads
+	// megabytes of identical html. chaptersLoaded counts pages of CHAPTERS_PER_LOAD.
+	private fun loadCallCount(expected: Int, loaded: Int): Int {
+		if (expected <= 0) return CHAPTER_LOAD_BATCH
+		val remaining = expected - loaded
+		if (remaining <= 0) return 0
+		return ((remaining + CHAPTERS_PER_LOAD - 1) / CHAPTERS_PER_LOAD).coerceAtMost(CHAPTER_LOAD_BATCH)
 	}
 
 	private fun normalizeChapters(chapters: List<MangaChapter>): List<MangaChapter> = chapters
@@ -466,15 +477,16 @@ internal abstract class OniSagaParser(
 		state: LivewireState,
 		code: String,
 		branch: String?,
+		loadCalls: Int,
 	): ChapterLoadResult? {
 		val response = livewireRequestLock.withLock {
 			webClient.httpPost(
 				"https://$domain/livewire/update".toHttpUrl(),
 				createLivewirePayload(
 					state = state,
-					calls = buildList(CHAPTER_LOAD_BATCH + 1) {
+					calls = buildList(loadCalls + 1) {
 						add(LivewireCall("setLanguage", JSONArray().put(code)))
-						repeat(CHAPTER_LOAD_BATCH) { add(LivewireCall("loadMoreChapters", JSONArray())) }
+						repeat(loadCalls) { add(LivewireCall("loadMoreChapters", JSONArray())) }
 					},
 				),
 				livewireHeaders(referer),
@@ -497,18 +509,21 @@ internal abstract class OniSagaParser(
 		referer: String,
 		start: ChapterLoadResult,
 		branch: String?,
+		expected: Int,
 	): ChapterLoadResult {
 		if (!start.hasMore) return start
 		var state = start.state
 		var chapters = start.chapters
 		var previousSize = chapters.size
 		repeat(MAX_CHAPTER_REQUESTS) {
+			val calls = loadCallCount(expected, chapters.size)
+			if (calls == 0) return ChapterLoadResult(chapters, state, false)
 			val response = livewireRequestLock.withLock {
 				webClient.httpPost(
 					"https://$domain/livewire/update".toHttpUrl(),
 					createLivewirePayload(
 						state = state,
-						calls = List(CHAPTER_LOAD_BATCH) { LivewireCall("loadMoreChapters", JSONArray()) },
+						calls = List(calls) { LivewireCall("loadMoreChapters", JSONArray()) },
 					),
 					livewireHeaders(referer),
 				).parseJson()
@@ -575,8 +590,8 @@ internal abstract class OniSagaParser(
 	}
 
 	// Chapter rows carry no language marker, the picker is the only place the available languages are listed.
-	private fun Document.parseChapterLanguages(): Map<String, String> {
-		val languages = LinkedHashMap<String, String>()
+	private fun Document.parseChapterLanguages(): Map<String, ChapterLanguage> {
+		val languages = LinkedHashMap<String, ChapterLanguage>()
 		for (button in select("button")) {
 			val action = button.attributes()
 				.firstOrNull { it.key.endsWith("click") && "setLanguage" in it.value }
@@ -591,7 +606,16 @@ internal abstract class OniSagaParser(
 				?.text()
 				?.trim()
 				?.nullIfEmpty()
-			languages[code] = label ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT)
+			// The badge is this language's chapter count and matches what parseChapters yields for it.
+			val total = button.selectFirst("[data-flux-badge]")
+				?.text()
+				?.filter(Char::isDigit)
+				?.toIntOrNull()
+				?: 0
+			languages[code] = ChapterLanguage(
+				label = label ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT),
+				total = total,
+			)
 		}
 		return languages
 	}
@@ -693,6 +717,7 @@ internal abstract class OniSagaParser(
 				val token = getReaderToken(chapterUrl) ?: loadReaderToken(chapterUrl)
 				awaitReaderSignRequestSlot()
 				val response = webClient.httpGet(apiUrl, readerHeaders(token, chapterUrl))
+				clearReaderSignBackoff()
 				response.header("x-reader-token-next")?.nullIfEmpty()?.let {
 					putReaderToken(chapterUrl, it)
 				}
@@ -718,7 +743,7 @@ internal abstract class OniSagaParser(
 							readerSignBackoffUntil = maxOf(
 								readerSignBackoffUntil,
 								System.currentTimeMillis() + READER_429_BACKOFF_MILLIS,
-							)
+							).coerceAtMost(System.currentTimeMillis() + READER_MAX_BACKOFF_MILLIS)
 						}
 					}
 					else -> throw error
@@ -737,21 +762,30 @@ internal abstract class OniSagaParser(
 		throw ParseException("Failed to fetch image after $READER_RETRIES attempts", apiUrl)
 	}
 
-	private suspend fun awaitReaderSignRequestSlot() = readerSignRateLock.withLock {
+	private suspend fun awaitReaderSignRequestSlot() {
+		// Waited without the rate lock: every pending page shares one backoff instead of queueing up
+		// behind it one after another, which is what turned a single 429 into a stalled reader.
 		while (true) {
-			val now = System.currentTimeMillis()
-			val delayMillis = synchronized(readerSignStateLock) {
-				maxOf(
-					lastReaderSignRequestStartedAt + READER_SIGN_REQUEST_INTERVAL_MILLIS,
-					readerSignBackoffUntil,
-				) - now
+			val backoff = synchronized(readerSignStateLock) {
+				readerSignBackoffUntil - System.currentTimeMillis()
 			}
-			if (delayMillis <= 0L) break
-			delay(delayMillis)
+			if (backoff <= 0L) break
+			delay(backoff.coerceAtMost(READER_MAX_BACKOFF_MILLIS))
 		}
-		synchronized(readerSignStateLock) {
-			lastReaderSignRequestStartedAt = System.currentTimeMillis()
+		readerSignRateLock.withLock {
+			val spacing = synchronized(readerSignStateLock) {
+				lastReaderSignRequestStartedAt + READER_SIGN_REQUEST_INTERVAL_MILLIS - System.currentTimeMillis()
+			}
+			if (spacing > 0L) delay(spacing)
+			synchronized(readerSignStateLock) {
+				lastReaderSignRequestStartedAt = System.currentTimeMillis()
+			}
 		}
+	}
+
+	// The backoff only ever moved forward and nothing ever cleared it, so it outlived the throttling.
+	private fun clearReaderSignBackoff() = synchronized(readerSignStateLock) {
+		readerSignBackoffUntil = 0L
 	}
 
 	private suspend fun loadReaderToken(chapterUrl: String): String {
@@ -837,8 +871,8 @@ internal abstract class OniSagaParser(
 	}
 
 	private fun readerRetryDelay(error: TooManyRequestExceptions): Long =
-		(error.getRetryDelay().takeIf { it > 0L } ?: READER_429_BACKOFF_MILLIS) +
-			READER_RETRY_MARGIN_MILLIS
+		((error.getRetryDelay().takeIf { it > 0L } ?: READER_429_BACKOFF_MILLIS) + READER_RETRY_MARGIN_MILLIS)
+			.coerceAtMost(READER_MAX_BACKOFF_MILLIS)
 
 	private fun extractReaderToken(body: String, chapterUrl: String): String? {
 		READER_TOKEN_REGEX.find(body)?.groupValues?.get(1)?.nullIfEmpty()?.let { return it }
@@ -1108,6 +1142,7 @@ internal abstract class OniSagaParser(
 	private data class ReaderState(val token: String, val orders: List<Int>)
 	private data class CachedReaderState(val state: ReaderState, val expiresAt: Long)
 	private data class LivewireCall(val method: String, val params: JSONArray)
+	private data class ChapterLanguage(val label: String, val total: Int)
 	private data class ChapterLoadResult(
 		val chapters: List<MangaChapter>,
 		val state: LivewireState,
@@ -1207,13 +1242,17 @@ internal abstract class OniSagaParser(
 	private companion object {
 		const val PAGE_SIZE = 24
 		const val CHAPTER_LOAD_BATCH = 50
-		const val MAX_CHAPTER_REQUESTS = 10
+		const val CHAPTERS_PER_LOAD = 100
+		const val MAX_CHAPTER_REQUESTS = 4
 		const val DETAILS_RETRIES = 3
 		const val DETAILS_RETRY_DELAY_MILLIS = 300L
 		const val SERVER_SESSION_RESET_COOLDOWN_MILLIS = 5_000L
-		const val READER_RETRIES = 3
-		const val READER_SIGN_REQUEST_INTERVAL_MILLIS = 250L
-		const val READER_429_BACKOFF_MILLIS = 10_000L
+		const val READER_RETRIES = 4
+		// 300 requests is the site-wide budget and /livewire/update spends from it too, so leave headroom.
+		const val READER_SIGN_REQUEST_INTERVAL_MILLIS = 300L
+		// The endpoint answers Retry-After: 3 when it throttles, a flat 10s just burned every retry.
+		const val READER_429_BACKOFF_MILLIS = 4_000L
+		const val READER_MAX_BACKOFF_MILLIS = 15_000L
 		const val READER_TOKEN_RETRY_MILLIS = 250L
 		const val READER_RETRY_MARGIN_MILLIS = 250L
 		const val READER_TOKEN_CACHE_SIZE = 16
