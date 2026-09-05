@@ -747,10 +747,31 @@ internal abstract class OniSagaParser(
 
 	private suspend fun loadReaderToken(chapterUrl: String): String {
 		return getReaderChapterLock(chapterUrl).withLock {
-			getReaderToken(chapterUrl) ?: loadReaderState(chapterUrl).token.nullIfEmpty()
+			getReaderToken(chapterUrl)
+				?: refreshReaderToken(chapterUrl)
+				?: loadReaderState(chapterUrl).token.nullIfEmpty()
 				?: throw ParseException("Could not refresh reader token", chapterUrl)
 		}
 	}
+
+	// The reader itself refreshes through this endpoint. It answers with just {"token": "..."}, so a stale
+	// token costs a couple of hundred bytes instead of re-downloading the half-megabyte reader page.
+	private suspend fun refreshReaderToken(chapterUrl: String): String? = runCatchingCancellable {
+		val chapterId = chapterUrl.toHttpUrlOrNull()?.pathSegments?.lastOrNull()?.nullIfEmpty()
+			?: return@runCatchingCancellable null
+		val json = webClient.httpGet(
+			"https://$domain/api/chapter/$chapterId/reader-token",
+			readerTokenHeaders(chapterUrl),
+		).parseJson()
+		json.getStringOrNull("token")?.nullIfEmpty()?.also { putReaderToken(chapterUrl, it) }
+	}.getOrNull()
+
+	private fun readerTokenHeaders(referer: String): Headers = getRequestHeaders().newBuilder()
+		.set("Accept", "application/json")
+		.set("Sec-Fetch-Mode", "cors")
+		.set("Sec-Fetch-Site", "same-origin")
+		.set("Referer", referer)
+		.build()
 
 	private suspend fun loadReaderState(chapterUrl: String): ReaderState {
 		repeat(READER_RETRIES) { attempt ->
@@ -1224,7 +1245,7 @@ internal abstract class OniSagaParser(
 		// Only used when the signed url carries no usable exp: re-sign soon rather than serve a dead url.
 		const val READER_PAGE_FALLBACK_TTL_MILLIS = 60_000L
 		const val READER_PAGE_EXPIRY_MARGIN_MILLIS = 30_000L
-		const val READER_STATE_CACHE_TTL_MILLIS = 10 * 60_000L
+		const val READER_STATE_CACHE_TTL_MILLIS = 60 * 60_000L
 		const val READER_UNAVAILABLE_CACHE_TTL_MILLIS = 30_000L
 		const val LIST_STATE_CACHE_SIZE = 12
 		const val LIST_STATE_CACHE_TTL = 15 * 60_000L
