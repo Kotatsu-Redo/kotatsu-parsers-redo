@@ -32,7 +32,7 @@ import java.util.Locale
 internal abstract class OniSagaParser(
 	context: MangaLoaderContext,
 	source: MangaParserSource,
-	private val languageCode: String?,
+	private val languageCode: String,
 ) : PagedMangaParser(context, source, PAGE_SIZE), Interceptor {
 
 	override val configKeyDomain = ConfigKey.Domain("onisaga.com")
@@ -397,63 +397,35 @@ internal abstract class OniSagaParser(
 	}
 
 	private suspend fun fetchChapters(document: Document): List<MangaChapter> {
-		val referer = document.location()
-		val state = document.extractLivewireState(CHAPTER_LIST_COMPONENT)
 		val languages = document.parseChapterLanguages()
+		// The picker lists every language this manga has, so an absent code means there is nothing to read.
+		if (languages.isNotEmpty() && languageCode !in languages) return emptyList()
+		val state = document.extractLivewireState(CHAPTER_LIST_COMPONENT)
 		val activeLanguage = state?.activeChapterLanguage()
 			?: languages.keys.firstOrNull()
 			?: DEFAULT_CHAPTER_LANGUAGE
-		val requestedLanguage = languageCode?.lowercase(Locale.ROOT)
-		// The picker lists every language this manga has, so an absent code means there is nothing to load.
-		if (requestedLanguage != null && languages.isNotEmpty() && requestedLanguage !in languages) {
-			return emptyList()
-		}
+		val expected = languages[languageCode] ?: 0
+		val pageChapters = parseChapters(document)
 		if (state == null) {
-			if (requestedLanguage != null && requestedLanguage != activeLanguage) return emptyList()
-			return parseChapters(document, branchName(activeLanguage, languages))
+			return if (languageCode == activeLanguage) sortChapters(pageChapters) else emptyList()
 		}
-		if (requestedLanguage != null) {
-			val expected = languages[requestedLanguage]?.total ?: 0
-			val start = if (requestedLanguage == activeLanguage) {
-				ChapterLoadResult(parseChapters(document, null), state, document.hasMoreChapters())
-			} else {
-				runCatchingCancellable {
-					switchChapterLanguage(referer, state, requestedLanguage, null, loadCallCount(expected, CHAPTERS_PER_LOAD))
-				}.getOrNull() ?: return emptyList()
-			}
-			val chapters = runCatchingCancellable { fetchChapterBatch(referer, start, null, expected) }
-				.getOrElse { start }
-				.chapters
-			return normalizeChapters(chapters)
+		val start = if (languageCode == activeLanguage) {
+			// The whole feed is already rendered into the details page: no request at all.
+			if (expected in 1..pageChapters.size) return sortChapters(pageChapters)
+			ChapterLoadResult(pageChapters, state, document.hasMoreChapters())
+		} else {
+			runCatchingCancellable {
+				switchChapterLanguage(
+					referer = document.location(),
+					state = state,
+					loadCalls = loadCallCount(expected, CHAPTERS_PER_LOAD),
+				)
+			}.getOrNull() ?: return emptyList()
 		}
-		val codes = LinkedHashSet<String>(languages.size + 1).apply {
-			add(activeLanguage)
-			addAll(languages.keys)
-		}
-		val chapters = ArrayList<MangaChapter>()
-		for (code in codes) {
-			val branch = branchName(code, languages)
-			val expected = languages[code]?.total ?: 0
-			val start = if (code == activeLanguage) {
-				ChapterLoadResult(parseChapters(document, branch), state, document.hasMoreChapters())
-			} else {
-				// setLanguage resets the feed, so every language starts from the untouched snapshot.
-				runCatchingCancellable {
-					switchChapterLanguage(referer, state, code, branch, loadCallCount(expected, CHAPTERS_PER_LOAD))
-				}.getOrNull() ?: continue
-			}
-			if (start.chapters.isEmpty()) continue
-			chapters += runCatchingCancellable {
-				fetchChapterBatch(referer, start, branch, expected)
-			}.getOrElse { start }.chapters
-		}
-		return normalizeChapters(chapters)
-	}
-
-	private fun branchName(code: String, languages: Map<String, ChapterLanguage>): String? = if (languageCode != null) {
-		null
-	} else {
-		languages[code]?.label ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT)
+		val chapters = runCatchingCancellable {
+			fetchChapterBatch(document.location(), start, expected)
+		}.getOrElse { start }.chapters
+		return sortChapters(chapters)
 	}
 
 	// Every response re-renders the whole feed, so asking past what the picker says exists just re-downloads
@@ -465,18 +437,13 @@ internal abstract class OniSagaParser(
 		return ((remaining + CHAPTERS_PER_LOAD - 1) / CHAPTERS_PER_LOAD).coerceAtMost(CHAPTER_LOAD_BATCH)
 	}
 
-	private fun normalizeChapters(chapters: List<MangaChapter>): List<MangaChapter> = chapters
+	private fun sortChapters(chapters: List<MangaChapter>): List<MangaChapter> = chapters
 		.distinctBy(MangaChapter::url)
-		.groupBy(MangaChapter::branch)
-		.values
-		.sortedByDescending(List<MangaChapter>::size)
-		.flatMap { branch -> branch.sortedBy(MangaChapter::number) }
+		.sortedBy(MangaChapter::number)
 
 	private suspend fun switchChapterLanguage(
 		referer: String,
 		state: LivewireState,
-		code: String,
-		branch: String?,
 		loadCalls: Int,
 	): ChapterLoadResult? {
 		val response = livewireRequestLock.withLock {
@@ -485,7 +452,7 @@ internal abstract class OniSagaParser(
 				createLivewirePayload(
 					state = state,
 					calls = buildList(loadCalls + 1) {
-						add(LivewireCall("setLanguage", JSONArray().put(code)))
+						add(LivewireCall("setLanguage", JSONArray().put(languageCode)))
 						repeat(loadCalls) { add(LivewireCall("loadMoreChapters", JSONArray())) }
 					},
 				),
@@ -495,11 +462,11 @@ internal abstract class OniSagaParser(
 		val component = response.firstComponent() ?: return null
 		val nextState = component.getStringOrNull("snapshot")?.let { LivewireState(it, state.token) } ?: return null
 		// An unsupported language resets the filter instead of switching to it.
-		if (nextState.activeChapterLanguage() != code) return null
+		if (nextState.activeChapterLanguage() != languageCode) return null
 		val html = component.optJSONObject("effects")?.getStringOrNull("html") ?: return null
 		val chapterDocument = Jsoup.parseBodyFragment(html, "https://$domain")
 		return ChapterLoadResult(
-			chapters = parseChapters(chapterDocument, branch),
+			chapters = parseChapters(chapterDocument),
 			state = nextState,
 			hasMore = chapterDocument.hasMoreChapters(),
 		)
@@ -508,7 +475,6 @@ internal abstract class OniSagaParser(
 	private suspend fun fetchChapterBatch(
 		referer: String,
 		start: ChapterLoadResult,
-		branch: String?,
 		expected: Int,
 	): ChapterLoadResult {
 		if (!start.hasMore) return start
@@ -535,7 +501,7 @@ internal abstract class OniSagaParser(
 			val nextState = component.getStringOrNull("snapshot")
 				?.let { LivewireState(it, state.token) }
 				?: return ChapterLoadResult(chapters, state, chapterDocument.hasMoreChapters())
-			val parsed = parseChapters(chapterDocument, branch)
+			val parsed = parseChapters(chapterDocument)
 			// The load button stays in the markup, a feed that stopped growing is the real end of the list.
 			if (parsed.size <= previousSize) return ChapterLoadResult(chapters, nextState, false)
 			chapters = parsed
@@ -546,7 +512,7 @@ internal abstract class OniSagaParser(
 		return ChapterLoadResult(chapters, state, true)
 	}
 
-	private fun parseChapters(document: Document, branch: String?): List<MangaChapter> {
+	private fun parseChapters(document: Document): List<MangaChapter> {
 		val raw = ArrayList<RawChapter>()
 		document.select("a.gap-4:has(div[data-flux-heading])").forEach { element ->
 			val url = element.attrAsRelativeUrlOrNull("href")?.takeIf { "/read/" in it } ?: return@forEach
@@ -583,15 +549,16 @@ internal abstract class OniSagaParser(
 				url = chapter.url,
 				scanlator = chapter.group,
 				uploadDate = chapter.date,
-				branch = branch,
+				branch = null,
 				source = source,
 			)
 		}
 	}
 
-	// Chapter rows carry no language marker, the picker is the only place the available languages are listed.
-	private fun Document.parseChapterLanguages(): Map<String, ChapterLanguage> {
-		val languages = LinkedHashMap<String, ChapterLanguage>()
+	// Chapter rows carry no language marker, the picker is the only place the available languages are listed,
+	// and its badge is that language's chapter count, which is exactly what parseChapters yields for it.
+	private fun Document.parseChapterLanguages(): Map<String, Int> {
+		val languages = LinkedHashMap<String, Int>()
 		for (button in select("button")) {
 			val action = button.attributes()
 				.firstOrNull { it.key.endsWith("click") && "setLanguage" in it.value }
@@ -601,21 +568,11 @@ internal abstract class OniSagaParser(
 				?.lowercase(Locale.ROOT)
 				?.nullIfEmpty()
 				?: continue
-			val label = button.select("span")
-				.lastOrNull { span -> span.text().any(Char::isLetter) }
-				?.text()
-				?.trim()
-				?.nullIfEmpty()
-			// The badge is this language's chapter count and matches what parseChapters yields for it.
-			val total = button.selectFirst("[data-flux-badge]")
+			languages[code] = button.selectFirst("[data-flux-badge]")
 				?.text()
 				?.filter(Char::isDigit)
 				?.toIntOrNull()
 				?: 0
-			languages[code] = ChapterLanguage(
-				label = label ?: LANGUAGE_NAMES[code] ?: code.uppercase(Locale.ROOT),
-				total = total,
-			)
 		}
 		return languages
 	}
@@ -800,11 +757,7 @@ internal abstract class OniSagaParser(
 			try {
 				val body = webClient.httpGet(chapterUrl).parseRaw()
 				val token = extractReaderToken(body, chapterUrl)
-				val orders = PAGE_ORDER_REGEX.findAll(body)
-					.mapNotNull { it.groupValues[1].toIntOrNull() }
-					.distinct()
-					.sorted()
-					.toList()
+				val orders = body.parsePageOrders()
 				if (token != null && orders.isNotEmpty()) {
 					putReaderToken(chapterUrl, token)
 					return ReaderState(token, orders).also { cacheReaderState(chapterUrl, it) }
@@ -821,6 +774,20 @@ internal abstract class OniSagaParser(
 		return ReaderState("", emptyList()).also {
 			cacheReaderState(chapterUrl, it, READER_UNAVAILABLE_CACHE_TTL_MILLIS)
 		}
+	}
+
+	private fun String.parsePageOrders(): List<Int> {
+		val strict = PAGE_ORDER_REGEX.findAll(this)
+			.mapNotNull { it.groupValues[1].toIntOrNull() }
+			.distinct()
+			.sorted()
+			.toList()
+		if (strict.isNotEmpty()) return strict
+		return PAGE_ORDER_FALLBACK_REGEX.findAll(this)
+			.mapNotNull { it.groupValues[1].toIntOrNull() }
+			.distinct()
+			.sorted()
+			.toList()
 	}
 
 	private fun getReaderToken(chapterUrl: String): String? = synchronized(readerTokens) {
@@ -906,7 +873,7 @@ internal abstract class OniSagaParser(
 			?.toLongOrNull()
 			?.times(1_000L)
 			?.minus(READER_PAGE_EXPIRY_MARGIN_MILLIS)
-		val expiresAt = signedExpiry?.takeIf { it > now } ?: now + READER_PAGE_CACHE_TTL_MILLIS
+		val expiresAt = signedExpiry?.takeIf { it > now } ?: (now + READER_PAGE_FALLBACK_TTL_MILLIS)
 		readerPageUrls[pageKey] = CachedPageUrl(url, expiresAt)
 	}
 
@@ -1142,7 +1109,6 @@ internal abstract class OniSagaParser(
 	private data class ReaderState(val token: String, val orders: List<Int>)
 	private data class CachedReaderState(val state: ReaderState, val expiresAt: Long)
 	private data class LivewireCall(val method: String, val params: JSONArray)
-	private data class ChapterLanguage(val label: String, val total: Int)
 	private data class ChapterLoadResult(
 		val chapters: List<MangaChapter>,
 		val state: LivewireState,
@@ -1213,31 +1179,29 @@ internal abstract class OniSagaParser(
 			.put("excludeGenre", JSONArray(excludedGenres))
 	}
 
-	@MangaSourceParser("ONISAGA", "OniSaga")
-	class All(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA, null)
-
+	// languageCode is the site's own filter value, as used by setLanguage('..').
 	@MangaSourceParser("ONISAGA_EN", "OniSaga (English)", "en")
-	class English(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_EN, "EN")
+	class English(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_EN, "en")
 
 	@MangaSourceParser("ONISAGA_FR", "OniSaga (Français)", "fr")
-	class French(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_FR, "FR")
+	class French(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_FR, "fr")
 
 	@MangaSourceParser("ONISAGA_JA", "OniSaga (日本語)", "ja")
-	class Japanese(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_JA, "JA")
+	class Japanese(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_JA, "ja")
 
 	@MangaSourceParser("ONISAGA_PT_BR", "OniSaga (Português Brasileiro)", "pt")
 	class BrazilianPortuguese(context: MangaLoaderContext) :
-		OniSagaParser(context, MangaParserSource.ONISAGA_PT_BR, "PT-BR")
+		OniSagaParser(context, MangaParserSource.ONISAGA_PT_BR, "pt-br")
 
 	@MangaSourceParser("ONISAGA_PT", "OniSaga (Português)", "pt")
-	class Portuguese(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_PT, "PT")
+	class Portuguese(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_PT, "pt")
 
 	@MangaSourceParser("ONISAGA_ES_419", "OniSaga (Español Latinoamérica)", "es")
 	class LatinAmericanSpanish(context: MangaLoaderContext) :
-		OniSagaParser(context, MangaParserSource.ONISAGA_ES_419, "ES-LA")
+		OniSagaParser(context, MangaParserSource.ONISAGA_ES_419, "es-la")
 
 	@MangaSourceParser("ONISAGA_ES", "OniSaga (Español)", "es")
-	class Spanish(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_ES, "ES")
+	class Spanish(context: MangaLoaderContext) : OniSagaParser(context, MangaParserSource.ONISAGA_ES, "es")
 
 	private companion object {
 		const val PAGE_SIZE = 24
@@ -1257,7 +1221,8 @@ internal abstract class OniSagaParser(
 		const val READER_RETRY_MARGIN_MILLIS = 250L
 		const val READER_TOKEN_CACHE_SIZE = 16
 		const val READER_PAGE_CACHE_SIZE = 512
-		const val READER_PAGE_CACHE_TTL_MILLIS = 10 * 60_000L
+		// Only used when the signed url carries no usable exp: re-sign soon rather than serve a dead url.
+		const val READER_PAGE_FALLBACK_TTL_MILLIS = 60_000L
 		const val READER_PAGE_EXPIRY_MARGIN_MILLIS = 30_000L
 		const val READER_STATE_CACHE_TTL_MILLIS = 10 * 60_000L
 		const val READER_UNAVAILABLE_CACHE_TTL_MILLIS = 30_000L
@@ -1321,16 +1286,6 @@ internal abstract class OniSagaParser(
 		}
 
 		val IMAGE_ATTRIBUTES = arrayOf("data-src", "data-lazy-src", "src")
-		// Only used when the picker markup changes, the page itself is the source of truth for the labels.
-		val LANGUAGE_NAMES = mapOf(
-			"en" to "English",
-			"fr" to "French",
-			"ja" to "Japanese",
-			"pt-br" to "Portuguese (BR)",
-			"pt" to "Portuguese",
-			"es-la" to "Spanish (LatAm)",
-			"es" to "Spanish",
-		)
 		val INITIAL_LIST_STATES =
 			object : LinkedHashMap<String, CachedLivewireState>(LIST_STATE_CACHE_SIZE, 0.75f, true) {
 				override fun removeEldestEntry(
@@ -1371,7 +1326,10 @@ internal abstract class OniSagaParser(
 		}
 		val READER_TOKEN_REGEX = Regex("""readerToken["']?\s*:\s*["']([^"']+)["']""")
 		val READER_TOKEN_CANDIDATE_REGEX = Regex("""[A-Za-z0-9+/]{80,}={0,2}""")
-		val PAGE_ORDER_REGEX = Regex("""["']?order["']?\s*:\s*(\d+)""")
+		// The reader page carries a JSON array of page descriptors. A bare `order:` also matches CSS and
+		// other json, inventing page numbers that can never be signed and never finish loading.
+		val PAGE_ORDER_REGEX = Regex("""["]order["]\s*:\s*(\d+)\s*,\s*["]is_spread["]""")
+		val PAGE_ORDER_FALLBACK_REGEX = Regex("""["]order["]\s*:\s*(\d+)""")
 		val CHAPTER_NUMBER_REGEX = Regex("""(?:Chapter\s+)?([\d.]+)""", RegexOption.IGNORE_CASE)
 		val RELATIVE_DATE_REGEX = Regex("""(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago""")
 		val RATING_REGEX = Regex("""(\d+(?:\.\d+)?)""")
