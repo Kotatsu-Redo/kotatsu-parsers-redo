@@ -402,9 +402,14 @@ internal abstract class OniSagaParser(
 		val visibleLanguages = document.select("a[href*='/read/']")
 			.mapNotNullTo(linkedSetOf()) { it.chapterLanguage() }
 		val selectedLanguage = state?.selectedChapterLanguage()
-			?: state?.activeChapterLanguage()
 			?: visibleLanguages.singleOrNull()
 			?: DEFAULT_CHAPTER_LANGUAGE
+		val selectedChapters = parseChapters(
+			document = document,
+			language = selectedLanguage,
+			matchLanguage = true,
+			includeUnlabeled = true,
+		)
 		val requestedLanguage = languageCode
 		if (requestedLanguage != null) {
 			val initialChapters = parseChapters(
@@ -416,46 +421,50 @@ internal abstract class OniSagaParser(
 			if (state == null) return initialChapters
 			return runCatchingCancellable {
 				val selected = if (selectedLanguage == requestedLanguage) {
-					ChapterLoadResult(initialChapters, state, document.hasMoreChapters())
+					ChapterLoadResult(selectedChapters, state, document.hasMoreChapters())
 				} else {
 					switchChapterLanguage(document.location(), state, requestedLanguage)
 						?: return@runCatchingCancellable initialChapters
 				}
-				fetchChapterBatch(
+				if (
+					selectedLanguage != requestedLanguage &&
+					selected.chapters.isSameChapterFeedAs(selectedChapters)
+				) {
+					return@runCatchingCancellable initialChapters
+				}
+				val loaded = fetchChapterBatch(
 					referer = document.location(),
 					initialState = selected.state,
 					code = requestedLanguage,
 					fallback = selected.chapters,
 					hasMore = selected.hasMore,
 				).chapters
+				if (selectedLanguage == requestedLanguage) {
+					loaded
+				} else {
+					val selectedUrls = selectedChapters.mapTo(hashSetOf(), MangaChapter::url)
+					normalizeChapters(initialChapters + loaded.filterNot { it.url in selectedUrls })
+				}
 			}.getOrElse { initialChapters }
 		}
 
-		val initialChapters = parseChapters(
-			document = document,
-			language = selectedLanguage,
-			matchLanguage = true,
-			includeUnlabeled = true,
-		)
-		val initialState = state ?: return initialChapters
+		val initialState = state ?: return selectedChapters
 		val chapters = ArrayList<MangaChapter>()
-		var currentState = initialState
-		var currentLanguage = selectedLanguage
 		val languageOrder = buildList {
 			add(selectedLanguage)
 			addAll(LANGUAGE_CODES)
 		}.distinct()
 		for (code in languageOrder) {
-			val selected = if (code == currentLanguage) {
-				ChapterLoadResult(initialChapters, currentState, document.hasMoreChapters())
+			val selected = if (code == selectedLanguage) {
+				ChapterLoadResult(selectedChapters, initialState, document.hasMoreChapters())
 			} else {
+				// chaptersLoaded belongs to the selected filter, so every language starts from the untouched snapshot.
 				runCatchingCancellable {
-					switchChapterLanguage(document.location(), currentState, code)
+					switchChapterLanguage(document.location(), initialState, code)
 				}.getOrNull() ?: continue
 			}
-			currentState = selected.state
-			currentLanguage = code
 			if (selected.chapters.isEmpty()) continue
+			if (code != selectedLanguage && selected.chapters.isSameChapterFeedAs(selectedChapters)) continue
 			val loaded = runCatchingCancellable {
 				fetchChapterBatch(
 					referer = document.location(),
@@ -465,18 +474,26 @@ internal abstract class OniSagaParser(
 					hasMore = selected.hasMore,
 				)
 			}.getOrElse { selected }
-			currentState = loaded.state
 			chapters += loaded.chapters
 		}
 		return normalizeChapters(chapters)
 	}
 
 	private fun normalizeChapters(chapters: List<MangaChapter>): List<MangaChapter> = chapters
-		.distinctBy { it.branch to it.number }
+		.distinctBy(MangaChapter::url)
 		.groupBy(MangaChapter::branch)
 		.values
 		.sortedByDescending(List<MangaChapter>::size)
 		.flatMap { branch -> branch.sortedBy(MangaChapter::number) }
+
+	private fun List<MangaChapter>.isSameChapterFeedAs(other: List<MangaChapter>): Boolean {
+		if (isEmpty() || other.isEmpty()) return false
+		val urls = mapTo(hashSetOf(), MangaChapter::url)
+		val otherUrls = other.mapTo(hashSetOf(), MangaChapter::url)
+		// A language update may keep rendering the current feed even though the snapshot property changed.
+		return (urls.size <= otherUrls.size && urls.all(otherUrls::contains)) ||
+			(otherUrls.size < urls.size && otherUrls.all(urls::contains))
+	}
 
 	private suspend fun switchChapterLanguage(
 		referer: String,
@@ -634,15 +651,6 @@ internal abstract class OniSagaParser(
 			is JSONArray -> value.optString(0)
 			else -> null
 		}?.takeIf(LANGUAGE_CODES::contains)
-	}.getOrNull()
-
-	private fun LivewireState.activeChapterLanguage(): String? = runCatchingCancellable {
-		JSONObject(snapshot)
-			.optJSONObject("data")
-			?.optString("activeLanguage")
-			?.replace('_', '-')
-			?.uppercase(Locale.ROOT)
-			?.takeIf(LANGUAGE_CODES::contains)
 	}.getOrNull()
 
 	private fun Document.hasMoreChapters(): Boolean = select("button").any {
