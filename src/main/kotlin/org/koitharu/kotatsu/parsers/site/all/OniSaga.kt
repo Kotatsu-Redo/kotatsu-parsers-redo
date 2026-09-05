@@ -598,8 +598,9 @@ internal abstract class OniSagaParser(
 
 	private fun LivewireState.activeChapterLanguage(): String? = runCatchingCancellable {
 		val data = JSONObject(snapshot).optJSONObject("data") ?: return@runCatchingCancellable null
-		// "language" is the picked filter and empty by default, "activeLanguage" is what the feed actually shows.
-		data.livewireString("language") ?: data.livewireString("activeLanguage")
+		// setLanguage sticks to the session, so "language" survives onto manga that do not have it at all and
+		// would mislabel their feed. "activeLanguage" is the language the returned chapters are really in.
+		data.livewireString("activeLanguage") ?: data.livewireString("language")
 	}.getOrNull()
 
 	private fun JSONObject.livewireString(key: String): String? = when (val value = opt(key)) {
