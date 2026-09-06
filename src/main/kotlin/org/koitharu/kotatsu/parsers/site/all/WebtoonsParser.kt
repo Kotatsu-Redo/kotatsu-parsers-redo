@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers.site.all
 import androidx.collection.arraySetOf
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.HttpUrl
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -23,6 +24,58 @@ internal abstract class WebtoonsParser(
 
 	private val mobileApiDomain = "m.webtoons.com"
 	private val staticDomain = "webtoon-phinf.pstatic.net"
+
+	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
+		if (link.host !in setOf("webtoons.com", "www.webtoons.com", mobileApiDomain)) return null
+		val segments = link.pathSegments
+		val targetSource = when (segments.firstOrNull()) {
+			"en" -> MangaParserSource.WEBTOONS_EN
+			"id" -> MangaParserSource.WEBTOONS_ID
+			"es" -> MangaParserSource.WEBTOONS_ES
+			"fr" -> MangaParserSource.WEBTOONS_FR
+			"th" -> MangaParserSource.WEBTOONS_TH
+			"zh-hant" -> MangaParserSource.WEBTOONS_ZH
+			"de" -> MangaParserSource.WEBTOONS_DE
+			else -> return null
+		}
+		when (segments.lastOrNull()) {
+			"list" -> if (segments.size != 4) return null
+			"viewer" -> if (segments.size !in 4..5) return null
+			else -> return null
+		}
+		if (segments.any { it.isBlank() }) return null
+		val titleParam = link.queryParameterValues("title_no").singleOrNull() ?: return null
+		if (titleParam.isEmpty() || titleParam.any { it !in '0'..'9' }) return null
+		val titleNo = titleParam.toLongOrNull()?.takeIf { it > 0 } ?: return null
+
+		// All locales share a domain, so the generic resolver may select any sibling.
+		// The factory returns a wrapper: use its interface instead of casting it.
+		val parser = if (targetSource == source) this else context.newParserInstance(targetSource)
+		// Viewer links can contain an extra episode slug. Preserve the series path,
+		// including Canvas, while discarding episode-specific path/query components.
+		val seriesUrl = link.newBuilder()
+			.encodedPath("/" + link.encodedPathSegments.take(3).joinToString("/") + "/list")
+			.query(null)
+			.addQueryParameter("title_no", titleNo.toString())
+			.fragment(null)
+			.build()
+		return parser.getDetails(
+			Manga(
+				id = parser.generateUid(titleNo),
+				title = "",
+				altTitles = emptySet(),
+				url = titleNo.toString(),
+				publicUrl = seriesUrl.toString(),
+				rating = RATING_UNKNOWN,
+				contentRating = null,
+				coverUrl = "",
+				tags = emptySet(),
+				state = null,
+				authors = emptySet(),
+				source = targetSource,
+			),
+		)
+	}
 
 	override val availableSortOrders: EnumSet<SortOrder> = EnumSet.of(
 		SortOrder.POPULARITY,
