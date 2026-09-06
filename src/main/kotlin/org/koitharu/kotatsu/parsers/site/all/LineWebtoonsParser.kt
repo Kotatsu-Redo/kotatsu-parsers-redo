@@ -243,8 +243,8 @@ internal abstract class LineWebtoonsParser(
 	}
 
 	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
-		val titleNo = link.queryParameter("title_no") ?: return null
-		return resolver.resolveManga(this, url = titleNo)
+		// These legacy sources share the domain and may win global routing.
+		return context.newParserInstance(MangaParserSource.WEBTOONS_EN).resolveLink(resolver, link)
 	}
 
 	private fun parseTag(jo: JSONObject): MangaTag {
