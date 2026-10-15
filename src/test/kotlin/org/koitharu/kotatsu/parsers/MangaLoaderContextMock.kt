@@ -14,13 +14,8 @@ import org.koitharu.kotatsu.parsers.util.await
 import org.koitharu.kotatsu.parsers.util.requireBody
 import org.koitharu.kotatsu.test_util.BitmapTestImpl
 import java.awt.image.BufferedImage
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSocketFactory
-import javax.net.ssl.X509TrustManager
 
 internal object MangaLoaderContextMock : MangaLoaderContext() {
 
@@ -28,7 +23,6 @@ internal object MangaLoaderContextMock : MangaLoaderContext() {
 
 	override val httpClient: OkHttpClient = OkHttpClient.Builder()
 		.cookieJar(cookieJar)
-		.permissiveSSL()
 		.addInterceptor(CommonHeadersInterceptor())
 		.addInterceptor(CloudFlareInterceptor())
 		.connectTimeout(20, TimeUnit.SECONDS)
@@ -83,25 +77,6 @@ internal object MangaLoaderContextMock : MangaLoaderContext() {
 		javaClass.getResourceAsStream("/cookies.txt")?.use {
 			cookieJar.loadFromStream(it)
 		} ?: println("No cookies loaded!")
-	}
-
-	private fun OkHttpClient.Builder.permissiveSSL() = also { builder ->
-		runCatching {
-			val trustAllCerts = object : X509TrustManager {
-				override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
-
-				override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) = Unit
-
-				override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-			}
-			val sslContext = SSLContext.getInstance("SSL")
-			sslContext.init(null, arrayOf(trustAllCerts), SecureRandom())
-			val sslSocketFactory: SSLSocketFactory = sslContext.socketFactory
-			builder.sslSocketFactory(sslSocketFactory, trustAllCerts)
-			builder.hostnameVerifier { _, _ -> true }
-		}.onFailure {
-			it.printStackTrace()
-		}
 	}
 
 }
