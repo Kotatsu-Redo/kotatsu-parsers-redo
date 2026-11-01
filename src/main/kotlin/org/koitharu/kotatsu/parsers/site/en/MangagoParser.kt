@@ -92,15 +92,16 @@ internal class MangagoParser(context: MangaLoaderContext) :
 
     override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
         if (!filter.query.isNullOrEmpty()) {
-            val url = buildString {
-                append("https://")
-                append(domain)
-                append("/r/l_search?name=")
-                append(filter.query.urlEncoded())
-                append("&page=")
-                append(page)
+            val results = search(filter.query, page)
+            if (page != paginator.firstPage) {
+                return results
             }
-            return parseMangaList(webClient.httpGet(url).parseHtml())
+            // The site matches anywhere in the name, author and summary without ranking, which can bury a title
+            // that is exactly the query. Its titles are stored with this label, so asking for that finds them.
+            val exact = runCatchingCancellable { search("${filter.query}$YAOI_LABEL", page) }
+                .getOrDefault(emptyList())
+                .filter { it.title.equals(filter.query, ignoreCase = true) }
+            return (exact + results).distinctBy { it.id }
         }
 
         val url = when (order) {
@@ -189,11 +190,24 @@ internal class MangagoParser(context: MangaLoaderContext) :
         }.distinctBy { it.url } // desktop pages nest .box inside .pic_list > li, both match
     }
 
+    private suspend fun search(query: String, page: Int): List<Manga> {
+        val url = buildString {
+            append("https://")
+            append(domain)
+            append("/r/l_search?name=")
+            append(query.urlEncoded())
+            append("&page=")
+            append(page)
+        }
+        return parseMangaList(webClient.httpGet(url).parseHtml())
+    }
+
     override suspend fun getDetails(manga: Manga): Manga {
         val doc = loadDetailsPage(manga.url.toAbsoluteUrl(domain))
         val infoBlock = doc.requireElementById("information")
 
-        val title = doc.selectFirstOrThrow(".w-title h1").text()
+        // The lists show the title without the label the details page adds
+        val title = doc.selectFirstOrThrow(".w-title h1").text().removeSuffix(YAOI_LABEL)
         val thumbnail = infoBlock.selectFirstOrThrow("img").absUrl("src")
 
         var description = infoBlock.selectFirst(".manga_summary")?.let { summary ->
@@ -657,10 +671,12 @@ internal class MangagoParser(context: MangaLoaderContext) :
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
+        // Taken from the request as sent: scrambled pages get redirected to another host (iweb6 to iweb7), and
+        // the request a redirect ends on has no fragment any more
+        val fragment = chain.request().url.fragment
         val response = chain.proceed(chain.request())
-        val fragment = response.request.url.fragment
 
-        if (fragment == null || !fragment.contains("desckey=")) {
+        if (fragment == null || !fragment.contains("desckey=") || !response.isSuccessful) {
             return response
         }
 
@@ -790,48 +806,52 @@ internal class MangagoParser(context: MangaLoaderContext) :
         return s
     }
 
-    private suspend fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
-        val imgkeys = deobfChapterJs
+    /**
+     * The key `renImg` in chapter.js picks for an image: from a table of hashes looked up in the file name, scrambled
+     * for two more hashes, a default one otherwise. Read here instead of running that code in a WebView, which would
+     * load the site once per page before the reader can open, and returns its result as a quoted JSON string.
+     */
+    private fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
+        val script = deobfChapterJs
             .substringAfter("var renImg = function(img,width,height,id){", "")
             .substringBefore("key = key.split(", "")
-            .split("\n")
-            .filter { line -> JS_FILTERS.none { filter -> line.contains(filter) } }
-            .joinToString("\n")
-            .replace("img.src", "url")
 
-        if (imgkeys.isEmpty()) {
-            throw Exception("Failed to extract image key extraction code from chapter.js")
-        }
+        var key = DEFAULT_IMAGE_KEY_REGEX.find(script)?.groupValues?.get(1)
+            ?: throw Exception("Failed to find the image key in chapter.js")
 
-        val js = """
-            function replacePos(strObj, pos, replacetext) {
-                var str = strObj.substr(0, pos) + replacetext + strObj.substring(pos + 1, strObj.length);
-                return str;
+        IMAGE_KEY_TABLE_REGEX.findAll(script).forEach { entry ->
+            if (entry.groupValues[1] in imageUrl) {
+                key = entry.groupValues[2]
             }
-            function getDescramblingKey(url) { $imgkeys; return key; }
-            getDescramblingKey("$imageUrl");
-        """.trimIndent()
-
-        val result = context.evaluateJs("https://$domain/", js, 10000L)
-
-        if (result.isNullOrEmpty()) {
-            throw Exception("Failed to evaluate JavaScript to get descrambling key. The image format or site structure may have changed.")
         }
 
-        return result
+        SCRAMBLED_IMAGE_KEYS_REGEX.find(script)?.let { keys ->
+            val (firstHash, secondHash, firstKey, secondKey) = keys.destructured
+            when {
+                firstHash in imageUrl -> key = unscrambleImageList(firstKey, deobfChapterJs)
+                secondHash in imageUrl -> key = unscrambleImageList(secondKey, deobfChapterJs)
+            }
+        }
+
+        return key
     }
 
     private companion object {
         private val IMG_SRCS_REGEX = Regex("""var imgsrcs\s*=\s*['"]([a-zA-Z0-9+=/]+)['"]""")
         private val COLS_REGEX = Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
         private val KEY_LOCATION_REGEX = Regex("""str\.charAt\(\s*(\d+)\s*\)""")
-        private val JS_FILTERS = listOf("jQuery", "document", "getContext", "toDataURL", "getImageData", "width", "height")
+        private val DEFAULT_IMAGE_KEY_REGEX = Regex("""var\s+key\s*=\s*"([0-9a]+)"""")
+        private val IMAGE_KEY_TABLE_REGEX = Regex("""_imgkeys_\["([0-9a-f]+)"]\s*=\s*"([0-9a]+)"""")
+        private val SCRAMBLED_IMAGE_KEYS_REGEX = Regex(
+            """indexOf\("([0-9a-f]+)"\)>0\|\|img\.src\.indexOf\("([0-9a-f]+)"\)>0\)\s*\{\s*var\s+\w+\s*=\s*img\.src\.indexOf\("[0-9a-f]+"\)>0\?"([0-9a]+)":"([0-9a]+)"""",
+        )
         private val WHITESPACE_REGEX = Regex("""\s+""")
         private const val UNKNOWN_SCANLATOR = "Unknown"
         private const val OFFICIAL_BRANCH = "Official"
         private val OFFICIAL_REGEX = Regex("""\bofficial\b""", RegexOption.IGNORE_CASE)
         private val PARTNER_CHAPTER_REGEX = Regex("""^https?://[^/]+(/chapter/\d+/\d+/?)$""")
         private const val DETAILS_PAGE_ATTEMPTS = 5
+        private const val YAOI_LABEL = " (Yaoi)"
         private const val DELETED_UPLOADS_TITLE = "DELETE"
         private val DELETED_UPLOADS_URL_REGEX = Regex("""/read-manga/delete_\d+/?$""")
     }
