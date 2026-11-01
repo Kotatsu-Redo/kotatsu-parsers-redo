@@ -79,6 +79,7 @@ internal class Kagane(context: MangaLoaderContext) :
     )
 
     private companion object {
+        val TITLE_TAG_REGEX = Regex("""\(([^()]+)\)\s*$""")
         val LINK_HOSTS = setOf("kagane.moe", "kagane.org", "kagane.cx", "kagane.net")
         val TOKEN_REJECTED_CODES = setOf(401, 403, 507)
         const val TOKEN_REFRESH_INTERVAL_MS = 60_000L
@@ -460,7 +461,17 @@ internal class Kagane(context: MangaLoaderContext) :
                     ),
                 )
             }
-            return chapters.sortedWith(
+            // Some series hold the same chapters from several teams, told apart by a tag at the end of the title
+            val hasRepeats = chapters.groupingBy { it.volume to it.number }.eachCount().values.any { it > 1 }
+            val branched = if (hasRepeats) {
+                chapters.map { chapter ->
+                    val tag = TITLE_TAG_REGEX.find(chapter.title.orEmpty())?.groupValues?.get(1)?.trim()
+                    chapter.copy(branch = tag ?: chapter.scanlator)
+                }
+            } else {
+                chapters
+            }
+            return branched.sortedWith(
                 compareBy<MangaChapter> { it.number <= 0f }
                     .thenBy { it.number }
                     .thenBy { it.volume }

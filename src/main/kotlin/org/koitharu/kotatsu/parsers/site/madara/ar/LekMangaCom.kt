@@ -29,7 +29,8 @@ internal class LekMangaCom(context: MangaLoaderContext) :
 
 	override suspend fun getDetails(manga: Manga): Manga {
 		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
-		val href = doc.selectFirst("head meta[property='og:url']")?.attr("content")?.toRelativeUrl(domain) ?: manga.url
+		// Some pages have a second tag first, with a "?post_type=wp-manga&p=<id>" url
+		val href = doc.select("head meta[property='og:url']").lastOrNull()?.attr("content")?.toRelativeUrl(domain) ?: manga.url
 		val chapters = if (doc.select(selectTestAsync).isEmpty()) loadChapters(href, doc) else getChapters(manga, doc)
 		val state = doc.selectFirst(selectState)?.selectLast("div.summary-content")?.let {
 			when (it.text().lowercase()) {

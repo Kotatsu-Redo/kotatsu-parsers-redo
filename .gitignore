@@ -97,3 +97,4 @@ local.properties
 /.idea/copilot.data.migration.ask2agent.xml
 /.idea/copilot.data.migration.edit.xml
 /.gradle-user-home
+/.claude
