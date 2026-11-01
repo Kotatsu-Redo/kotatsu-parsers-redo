@@ -37,7 +37,7 @@ import java.util.EnumSet
 internal class KomikApk(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.KOMIKAPK, 21) {
 
-	override val configKeyDomain = ConfigKey.Domain("komikapk.app", "komikapk.org")
+	override val configKeyDomain = ConfigKey.Domain("komikapk.app")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,
