@@ -2,6 +2,9 @@ package org.koitharu.kotatsu.parsers.site.id
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
+import okhttp3.Interceptor
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -18,19 +21,49 @@ import java.util.concurrent.ConcurrentHashMap
 internal class Voratoon(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.VORATOON, pageSize = 30) {
 
-	// Web frontend domain (moves often). The JSON API stays on API_DOMAIN.
-	override val configKeyDomain = ConfigKey.Domain("v8.voratoon.com", "v7.voratoon.com", "v6.voratoon.com")
+	// The JSON API sits behind the site's own proxy now; api.voratoon.com and the vN hosts answer 403.
+	override val configKeyDomain = ConfigKey.Domain("voratoon.co")
+
+	// Earlier versions offered these hosts, and the app keeps a saved domain: it would stay on a dead one.
+	private val siteDomain: String
+		get() = domain.takeUnless { it == "voratoon.id" || it == "voratoon.com" || it.endsWith(".voratoon.com") }
+			?: configKeyDomain.defaultValue
+
+	private val apiUrl: String
+		get() = "https://$siteDomain/api/proxy"
+
+	// The proxy refuses any other origin, and the default Referer comes from the saved domain
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.set("Referer", "https://$siteDomain/")
+		.build()
+
+	override fun intercept(chain: Interceptor.Chain): Response {
+		val request = chain.request()
+		val response = chain.proceed(request)
+		if (response.code != 403 || request.url.host != siteDomain || !request.url.encodedPath.startsWith("/api/")) {
+			return response
+		}
+		response.close()
+		// The proxy only answers with the vt_proxy cookie, which the site sets on its pages.
+		chain.proceed(
+			request.newBuilder()
+				.url("https://$siteDomain/")
+				.removeHeader("Accept")
+				.build(),
+		).close()
+		return chain.proceed(request)
+	}
 
 	override suspend fun getFavicons(): Favicons {
 		return Favicons(
 			listOf(
 				Favicon(
-					url = "https://$domain/icon.png",
+					url = "https://$siteDomain/icon.png",
 					size = 64,
 					rel = null,
 				),
 			),
-			referer = "https://$domain",
+			referer = "https://$siteDomain",
 		)
 	}
 
@@ -54,7 +87,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 	private suspend fun fetchAvailableTags(): Set<MangaTag> {
 		tagsCache["all"]?.let { return it }
 		return runCatching {
-			val json = webClient.httpGet("https://$API_DOMAIN/genres").parseJson()
+			val json = webClient.httpGet("$apiUrl/genres").parseJson()
 			val arr = json.optJSONArray("data") ?: return@runCatching emptySet<MangaTag>()
 			val tags = LinkedHashSet<MangaTag>(arr.length())
 			for (i in 0 until arr.length()) {
@@ -98,7 +131,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 	}
 
 	private fun buildListUrl(page: Int, sort: String, filter: MangaListFilter): String = buildString {
-		append("https://").append(API_DOMAIN).append("/series")
+		append(apiUrl).append("/series")
 		append("?take=").append(pageSize)
 		append("&page=").append(page)
 		append("&sort=").append(sort)
@@ -133,7 +166,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 		val chapters = chaptersDeferred.await().optJSONArray("data")
 		manga.copy(
 			title = data.optString("title").ifBlank { manga.title },
-			publicUrl = "https://$domain/series/$slug",
+			publicUrl = "https://$siteDomain/series/$slug",
 			altTitles = setOfNotNull(data.optString("nativeTitle").ifBlank { null }),
 			coverUrl = data.optString("coverImage").ifEmpty { manga.coverUrl },
 			largeCoverUrl = data.optString("backgroundImage").ifEmpty { null },
@@ -163,13 +196,13 @@ internal class Voratoon(context: MangaLoaderContext) :
 	}
 
 	private fun buildDetailsUrl(slug: String): String = buildString {
-		append("https://").append(API_DOMAIN).append("/series")
+		append(apiUrl).append("/series")
 		append("?take=1&page=1&includeMeta=true&takeChapter=1")
 		append("&filter=slug%3D%3D").append(slug.urlEncoded())
 	}
 
 	private fun buildChaptersUrl(slug: String): String =
-		"https://$API_DOMAIN/series/${slug.urlEncoded()}/chapters"
+		"$apiUrl/series/${slug.urlEncoded()}/chapters"
 
 	private suspend fun fetchChapterPages(slug: String, chapterNumber: String): List<MangaPage> {
 		val url = "${buildChaptersUrl(slug)}/${chapterNumber.urlEncoded()}"
@@ -213,7 +246,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 			title = data.optString("title").ifBlank { "Untitled" },
 			altTitles = setOfNotNull(data.optString("nativeTitle").ifBlank { null }),
 			url = "/series/$slug",
-			publicUrl = "https://$domain/series/$slug",
+			publicUrl = "https://$siteDomain/series/$slug",
 			rating = data.optDouble("rating", 0.0).let { if (it > 0f) it.toFloat() / 10f else RATING_UNKNOWN },
 			contentRating = ContentRating.SAFE,
 			coverUrl = data.optString("coverImage").ifEmpty { null },
@@ -315,10 +348,5 @@ internal class Voratoon(context: MangaLoaderContext) :
 	private fun parseAuthors(author: String): Set<String> {
 		if (author.isBlank()) return emptySet()
 		return setOf(author.trim())
-	}
-
-	private companion object {
-
-		const val API_DOMAIN = "api.voratoon.com"
 	}
 }
