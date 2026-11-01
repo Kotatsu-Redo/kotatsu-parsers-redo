@@ -5,6 +5,6 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.likemanga.LikeMangaParser
 
-@MangaSourceParser("LIKEMANGA", "LikeManga", "en")
+@MangaSourceParser("LIKEMANGA", "MGRead (LikeManga)", "en")
 internal class LikeManga(context: MangaLoaderContext) :
-	LikeMangaParser(context, MangaParserSource.LIKEMANGA, "likemanga.ink")
+	LikeMangaParser(context, MangaParserSource.LIKEMANGA, "mgread.io")
