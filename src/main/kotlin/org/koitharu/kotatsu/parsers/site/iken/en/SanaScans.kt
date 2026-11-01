@@ -126,7 +126,7 @@ internal class SanaScans(context: MangaLoaderContext) :
 			}
 			val slug = jo.getString("slug")
 			val url = "/series/$slug"
-			val isAdult = jo.getBooleanOrDefault("hot", false) || jo.getBooleanOrDefault("adult", false)
+			val isAdult = jo.getBooleanOrDefault("adult", false)
 			val author = jo.getStringOrNull("author")?.trim()?.nullIfEmpty()
 			val description = jo.getStringOrNull("postContent")
 				?: jo.getStringOrNull("description")
