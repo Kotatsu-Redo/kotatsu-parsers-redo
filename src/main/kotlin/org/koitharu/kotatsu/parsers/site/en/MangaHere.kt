@@ -45,7 +45,7 @@ import java.util.Locale
 internal class MangaHere(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.MANGAHERE, pageSize = 70, searchPageSize = 12) {
 
-	override val configKeyDomain = ConfigKey.Domain("www.mangahere.cc", "m.mangahere.cc", "newm.mangahere.cc")
+	override val configKeyDomain = ConfigKey.Domain("www.mangahere.cc")
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.UPDATED,
