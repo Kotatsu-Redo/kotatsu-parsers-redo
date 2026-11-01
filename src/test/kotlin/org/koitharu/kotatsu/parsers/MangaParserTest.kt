@@ -114,7 +114,12 @@ internal class MangaParserTest {
 	fun tagsMultiple(source: MangaParserSource) = runTest(timeout = timeout) {
 		val parser = context.newParserInstance(source)
 //		if (!parser.filterCapabilities.isMultipleTagsSupported) return@runTest
-		val tags = parser.getFilterOptions().availableTags.shuffled().take(2).toSet()
+		val availableTags = parser.getFilterOptions().availableTags
+		// Two random tags often share no title, so prefer two that a listed title actually has
+		val tags = parser.getList(MangaSearchQuery.EMPTY).shuffled().take(10).firstNotNullOfOrNull { manga ->
+			val titles = parser.getDetails(manga).tags.mapTo(HashSet()) { it.title.lowercase() }
+			availableTags.filter { it.title.lowercase() in titles }.shuffled().take(2).toSet().takeIf { it.size == 2 }
+		} ?: availableTags.shuffled().take(2).toSet()
 
 		val list = parser.getList(
 			MangaSearchQuery.Builder()
