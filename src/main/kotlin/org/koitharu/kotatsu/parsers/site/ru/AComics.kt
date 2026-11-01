@@ -10,10 +10,8 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
-import org.koitharu.kotatsu.parsers.Broken
 import java.util.*
 
-@Broken
 @MangaSourceParser("ACOMICS", "AComics", "ru", ContentType.COMICS)
 internal class AComics(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.ACOMICS, pageSize = 10) {
@@ -41,6 +39,7 @@ internal class AComics(context: MangaLoaderContext) :
     override suspend fun getFilterOptions() = MangaListFilterOptions(
         availableTags = getOrCreateTagMap().values.toSet(),
         availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED),
+        availableContentRating = EnumSet.of(ContentRating.SAFE, ContentRating.SUGGESTIVE, ContentRating.ADULT),
     )
 
     override suspend fun getListPage(
@@ -53,16 +52,15 @@ internal class AComics(context: MangaLoaderContext) :
             append(domain)
             when {
                 !filter.query.isNullOrEmpty() -> {
-                    if (page > 0) {
-                        return emptyList()
-                    }
                     append("/search?keyword=")
-                    append(filter.query)
+                    append(filter.query.urlEncoded())
+                    append("&skip=")
+                    append(page * pageSize)
                 }
 
                 else -> {
-                    append("/comics?ratings[]=1&ratings[]=2&ratings[]=3&ratings[]=4&ratings[]=5&ratings[]=6&skip=")
-                    append(page * 10)
+                    append("/comics?skip=")
+                    append(page * pageSize)
                     append("&sort=")
                     append(
                         when (order) {
@@ -73,22 +71,27 @@ internal class AComics(context: MangaLoaderContext) :
                         },
                     )
 
-                    if (filter.tags.isNotEmpty()) {
-                        append("&categories=")
-                        append(filter.tags.joinToString(separator = ",") { it.key })
+                    val ratings = filter.contentRating.ifEmpty { ContentRating.entries }.flatMap {
+                        when (it) {
+                            ContentRating.SAFE -> listOf(1, 2, 3, 4) // NR, G, PG, PG-13
+                            ContentRating.SUGGESTIVE -> listOf(5) // R
+                            ContentRating.ADULT -> listOf(6) // NC-17
+                        }
+                    }
+                    for (rating in ratings) {
+                        append("&ratings[]=")
+                        append(rating)
                     }
 
-                    if (filter.states.isNotEmpty()) {
-                        append("&updatable=")
-                        append(
-                            filter.states.oneOrThrowIfMany().let {
-                                when (it) {
-                                    MangaState.ONGOING -> "yes"
-                                    MangaState.FINISHED -> "no"
-                                    else -> "0"
-                                }
-                            },
-                        )
+                    for (tag in filter.tags) {
+                        append("&categories[]=")
+                        append(tag.key)
+                    }
+
+                    when (filter.states.singleOrNull()) {
+                        MangaState.ONGOING -> append("&updatable=yes")
+                        MangaState.FINISHED -> append("&updatable=no")
+                        else -> Unit
                     }
                 }
             }
@@ -98,18 +101,23 @@ internal class AComics(context: MangaLoaderContext) :
     }
 
     private fun parseMangaList(docs: Document): List<Manga> {
-        return docs.select("table.list-loadable").map {
-            val a = it.selectFirstOrThrow("a")
-            val url = a.attrAsAbsoluteUrl("href") + "/about"
+        return docs.select("section.serial-card").map {
+            val a = it.selectFirstOrThrow("h2.title a")
+            val url = a.attrAsRelativeUrl("href") + "/about"
             Manga(
-                id = generateUid(url),
+                id = generateStableUid(url),
                 url = url,
-                title = it.selectFirstOrThrow(".title").text(),
+                title = a.text(),
                 altTitles = emptySet(),
-                publicUrl = url,
+                publicUrl = url.toAbsoluteUrl(domain),
                 rating = RATING_UNKNOWN,
-                contentRating = if (isNsfwSource) ContentRating.ADULT else null,
-                coverUrl = it.selectFirstOrThrow("img").src().orEmpty(),
+                contentRating = when {
+                    it.selectFirst(".age-rating-label.rating6") != null -> ContentRating.ADULT
+                    it.selectFirst(".age-rating-label.rating5") != null -> ContentRating.SUGGESTIVE
+                    it.selectFirst(".age-rating-label") != null -> ContentRating.SAFE
+                    else -> null
+                },
+                coverUrl = it.selectFirst("a.cover img")?.attrAsAbsoluteUrlOrNull("data-real-src"),
                 tags = emptySet(),
                 state = null,
                 authors = emptySet(),
@@ -118,20 +126,25 @@ internal class AComics(context: MangaLoaderContext) :
         }
     }
 
+    // Manga and page urls used to be absolute. Saved manga keep their ids, and their old urls still work.
+    private fun generateStableUid(path: String) = generateUid("https://acomics.ru$path")
+
+    // "/~name" of any link to a comic
+    private fun String.toComicPath() = "/" + toRelativeUrl(domain).removePrefix("/").substringBefore('/')
+
     private var tagCache: ArrayMap<String, MangaTag>? = null
     private val mutex = Mutex()
 
     private suspend fun getOrCreateTagMap(): Map<String, MangaTag> = mutex.withLock {
         tagCache?.let { return@withLock it }
         val tagMap = ArrayMap<String, MangaTag>()
-        val tagElements =
-            webClient.httpGet("https://$domain/comics").parseHtml().requireElementById("catalog").select(" a.button")
+        val tagElements = webClient.httpGet("https://$domain/comics").parseHtml().select("fieldset.categories label")
         for (el in tagElements) {
-            val name = el.html().substringAfterLast("</span>")
+            val name = el.text()
             if (name.isEmpty()) continue
             tagMap[name] = MangaTag(
                 title = name,
-                key = el.attr("onclick").substringAfterLast("('").substringBefore("')"),
+                key = el.selectFirstOrThrow("input").attr("value"),
                 source = source,
             )
         }
@@ -140,22 +153,28 @@ internal class AComics(context: MangaLoaderContext) :
     }
 
     override suspend fun getDetails(manga: Manga): Manga {
-        val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+        val comicPath = manga.url.toComicPath()
+        val doc = webClient.httpGet("$comicPath/about".toAbsoluteUrl(domain)).parseHtml()
         val tagMap = getOrCreateTagMap()
-        val tags = doc.select("p.serial-about-badges .category").mapNotNullToSet { tagMap[it.text()] }
-        val author = doc.selectFirst("p:contains(Автор оригинала:)")?.text()?.replace("Автор оригинала: ", "")
+        val tags = doc.select("p.serial-about-badges a.category").mapNotNullToSet { tagMap[it.text()] }
+        val credits = doc.selectFirst("p.serial-about-authors")
+        val creditNames = credits?.select("a")?.eachText().orEmpty()
+        // A translation lists its translators there, and the original author on a line of its own
+        val isTranslation = credits?.selectFirst("b")?.text()?.startsWith("Переводчик") == true
+        val originalAuthor = doc.selectFirst("p:has(> b:contains(Автор оригинала))")?.ownText()?.trim()
         return manga.copy(
+            title = doc.selectFirst("article h1")?.text() ?: manga.title,
             tags = tags,
-            description = doc.selectFirst("section.serial-about-text p")?.text(),
-            authors = setOfNotNull(author),
+            description = doc.selectFirst("section.serial-about-text")?.html(),
+            authors = if (isTranslation) setOfNotNull(originalAuthor) else creditNames.toSet(),
             chapters = listOf(
                 MangaChapter(
                     id = manga.id,
                     title = manga.title,
                     number = 1f,
                     volume = 0,
-                    url = manga.url.replace("/about", "/"),
-                    scanlator = null,
+                    url = "$comicPath/",
+                    scanlator = creditNames.joinToString().takeIf { isTranslation && it.isNotEmpty() },
                     uploadDate = 0,
                     branch = null,
                     source = source,
@@ -165,12 +184,13 @@ internal class AComics(context: MangaLoaderContext) :
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-        val doc = webClient.httpGet(chapter.url + "1").parseHtml()
-        val totalPages = doc.selectFirstOrThrow("span.issueNumber").text().substringAfterLast('/').toInt()
+        val comicPath = chapter.url.toComicPath()
+        val doc = webClient.httpGet("$comicPath/1".toAbsoluteUrl(domain)).parseHtml()
+        val totalPages = doc.selectFirstOrThrow("nav.reader-navigator").attr("data-issue-count").toInt()
         return (1..totalPages).map {
-            val url = chapter.url + it
+            val url = "$comicPath/$it"
             MangaPage(
-                id = generateUid(url),
+                id = generateStableUid(url),
                 url = url,
                 preview = null,
                 source = source,
@@ -180,6 +200,6 @@ internal class AComics(context: MangaLoaderContext) :
 
     override suspend fun getPageUrl(page: MangaPage): String {
         val doc = webClient.httpGet(page.url.toAbsoluteUrl(domain)).parseHtml()
-        return doc.requireElementById("mainImage").requireSrc()
+        return doc.selectFirstOrThrow("section.reader-issue img.issue").requireSrc()
     }
 }
