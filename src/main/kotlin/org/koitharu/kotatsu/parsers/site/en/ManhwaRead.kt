@@ -471,15 +471,17 @@ internal class ManhwaRead(context: MangaLoaderContext) :
 
 	private suspend fun fetchTagRegistry(): TagRegistry {
 		val (genreResponse, firstTagResponse) = coroutineScope {
-			val g = async { fetchTaxonomyPage("manga_genre", offset = 0, includeTotal = true) }
-			val t = async { fetchTaxonomyPage("manga_tag", offset = 0, includeTotal = true) }
+			// These two must not swallow errors: an empty registry would stay cached, and a Cloudflare
+			// challenge would never reach the app.
+			val g = async { requestTaxonomyPage("manga_genre", offset = 0, includeTotal = true) }
+			val t = async { requestTaxonomyPage("manga_tag", offset = 0, includeTotal = true) }
 			g.await() to t.await()
 		}
-		val totalTags = firstTagResponse?.optInt("total", DEFAULT_TOTAL_TAGS) ?: DEFAULT_TOTAL_TAGS
+		val totalTags = firstTagResponse.optInt("total", DEFAULT_TOTAL_TAGS)
 
 		val rawTerms = ArrayList<RawTerm>(totalTags + 40)
-		genreResponse?.optJSONArray("results")?.let { rawTerms.addAll(parseTermsArray(it)) }
-		firstTagResponse?.optJSONArray("results")?.let { rawTerms.addAll(parseTermsArray(it)) }
+		genreResponse.optJSONArray("results")?.let { rawTerms.addAll(parseTermsArray(it)) }
+		firstTagResponse.optJSONArray("results")?.let { rawTerms.addAll(parseTermsArray(it)) }
 
 		val offsets = (40 until totalTags step 40).toList()
 		for (chunk in offsets.chunked(TAG_FETCH_CONCURRENCY)) {
@@ -535,10 +537,18 @@ internal class ManhwaRead(context: MangaLoaderContext) :
 		offset: Int,
 		includeTotal: Boolean,
 	): JSONObject? = runCatchingCancellable {
+		requestTaxonomyPage(taxonomy, offset, includeTotal)
+	}.getOrNull()
+
+	private suspend fun requestTaxonomyPage(
+		taxonomy: String,
+		offset: Int,
+		includeTotal: Boolean,
+	): JSONObject {
 		val extra = if (includeTotal) "total" else ""
 		val url = "https://$domain/wp-admin/admin-ajax.php?action=search_manga_terms&search=&taxonomy=$taxonomy&offset=$offset&extra_fields=$extra&hide_empty=1"
-		webClient.httpGet(url).parseJson()
-	}.getOrNull()
+		return webClient.httpGet(url).parseJson()
+	}
 
 	private fun parseTermsArray(array: JSONArray): List<RawTerm> {
 		val list = ArrayList<RawTerm>(array.length())
