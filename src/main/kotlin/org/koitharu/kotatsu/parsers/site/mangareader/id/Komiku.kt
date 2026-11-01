@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.mangareader.id
 
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.ContentType
@@ -202,6 +203,8 @@ internal class Komiku(context: MangaLoaderContext) :
         }?.substringBeforeLast("?")
 
         return manga.copy(
+            // A manga opened from a shared link has no title yet
+            title = docs.selectFirst("h1 span[itemprop=name]")?.text()?.ifBlank { null } ?: manga.title,
             altTitles = setOfNotNull(altTitle),
             description = docs.selectFirst(detailsDescriptionSelector)?.text() ?: manga.description,
             state = state ?: manga.state,
@@ -214,22 +217,22 @@ internal class Komiku(context: MangaLoaderContext) :
 
     private suspend fun fetchAvailableTags(): Set<MangaTag> {
         val doc = webClient.httpGet("https://$domain/pustaka/").parseHtml()
-        val tags = mutableSetOf<MangaTag>()
+        // Every genre shows its title count, as "Action (4.179)". Many have none, and some are listed
+        // twice, as "Josei (120)" and "Josei (3)": skip the empty ones and keep the one with the most titles.
+        fun Element.titleCount() = text().substringAfter("(", "").substringBefore(")")
+            .filter { it.isDigit() }.toIntOrNull() ?: 0
 
-        doc.select("select[name='genre'] option").forEach { option ->
-            val value = option.attr("value").trim()
-            val title = option.text().substringBefore("(").trim()
-
-            if (value.isNotBlank() && !title.equals("Genre", true)) {
-                tags.add(
-                    MangaTag(
-                        key = value,
-                        title = title,
-                        source = source,
-                    ),
+        return doc.select("select[name='genre'] option")
+            .filter { option -> option.attr("value").isNotBlank() && option.titleCount() > 0 }
+            .groupBy { option -> option.text().substringBefore("(").trim().lowercase(sourceLocale) }
+            .values
+            .mapNotNullToSet { options ->
+                val option = options.maxByOrNull { it.titleCount() } ?: return@mapNotNullToSet null
+                MangaTag(
+                    key = option.attr("value").trim(),
+                    title = option.text().substringBefore("(").trim().toTitleCase(sourceLocale),
+                    source = source,
                 )
             }
-        }
-        return tags
     }
 }
