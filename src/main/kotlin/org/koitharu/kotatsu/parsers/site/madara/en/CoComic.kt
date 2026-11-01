@@ -1,9 +1,11 @@
 package org.koitharu.kotatsu.parsers.site.madara.en
 
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.ContentType
+import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
@@ -18,6 +20,10 @@ internal class CoComic(context: MangaLoaderContext) :
 		get() = true
 
 	override val selectChapter: String = "li.wp-manga-chapter:not(.premium):not(.premium-block)"
+
+	// The site lists posts that have no title, and repeats rows within a page when sorted by latest.
+	override fun parseMangaList(doc: Document): List<Manga> =
+		super.parseMangaList(doc).filter { it.title.isNotBlank() }.distinctBy { it.id }
 
 	override suspend fun fetchAvailableTags(): Set<MangaTag> {
 		val doc = webClient.httpGet("https://$domain/?s=&post_type=wp-manga").parseHtml()
