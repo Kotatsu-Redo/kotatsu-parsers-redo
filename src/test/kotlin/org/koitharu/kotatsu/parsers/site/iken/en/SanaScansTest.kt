@@ -103,8 +103,8 @@ internal class SanaScansTest {
 		val filterOpts = parser.getFilterOptions()
 		assertEquals(setOf(ContentType.MANGA, ContentType.MANHWA), filterOpts.availableContentTypes)
 		val tags = filterOpts.availableTags
-		assertEquals(listOf("7", "9"), tags.map { it.key })
-		assertEquals(listOf("Fantasy", "Action"), tags.map { it.title })
+		assertEquals(setOf("7", "9"), tags.mapTo(HashSet()) { it.key })
+		assertEquals(setOf("Fantasy", "Action"), tags.mapTo(HashSet()) { it.title })
 
 		val listItem = parser.getListPage(1, SortOrder.UPDATED, MangaListFilter.EMPTY).single()
 		assertEquals("/series/sample-series", listItem.url)
