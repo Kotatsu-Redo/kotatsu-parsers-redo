@@ -272,7 +272,7 @@ internal abstract class NineMangaParser(
     class English(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_EN,
-        "www.ninemanga.com",
+        "www.niadd.com",
     )
 
     @Broken
@@ -280,7 +280,7 @@ internal abstract class NineMangaParser(
     class Spanish(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_ES,
-        "es.ninemanga.com",
+        "es.niadd.com",
     )
 
     @Broken
@@ -288,7 +288,7 @@ internal abstract class NineMangaParser(
     class Russian(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_RU,
-        "ru.ninemanga.com",
+        "ru.niadd.com",
     )
 
     @Broken
@@ -296,7 +296,7 @@ internal abstract class NineMangaParser(
     class Deutsch(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_DE,
-        "de.ninemanga.com",
+        "de.niadd.com",
     )
 
     @Broken
@@ -304,7 +304,7 @@ internal abstract class NineMangaParser(
     class Brazil(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_BR,
-        "br.ninemanga.com",
+        "br.niadd.com",
     )
 
     @Broken
@@ -312,7 +312,7 @@ internal abstract class NineMangaParser(
     class Italiano(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_IT,
-        "it.ninemanga.com",
+        "it.niadd.com",
     )
 
     @Broken
@@ -320,6 +320,6 @@ internal abstract class NineMangaParser(
     class Francais(context: MangaLoaderContext) : NineMangaParser(
         context,
         MangaParserSource.NINEMANGA_FR,
-        "fr.ninemanga.com",
+        "fr.niadd.com",
     )
 }

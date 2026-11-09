@@ -6,7 +6,6 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
-import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -31,12 +30,11 @@ import org.koitharu.kotatsu.parsers.util.parseSafe
 import org.koitharu.kotatsu.parsers.util.json.getBooleanOrDefault
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
-import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
+import java.text.Normalizer
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
 
-@Broken
 @MangaSourceParser("GEASSCOMICS", "Geass Comics", "pt")
 internal class GeassComics(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.GEASSCOMICS, PAGE_SIZE) {
@@ -62,7 +60,7 @@ internal class GeassComics(context: MangaLoaderContext) :
 		.build()
 
 	override val defaultSortOrder: SortOrder
-		get() = SortOrder.POPULARITY
+		get() = SortOrder.UPDATED
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.RELEVANCE,
@@ -85,22 +83,16 @@ internal class GeassComics(context: MangaLoaderContext) :
 			MangaState.ONGOING,
 			MangaState.FINISHED,
 			MangaState.PAUSED,
-			MangaState.ABANDONED,
-		),
-		availableContentRating = EnumSet.of(
-			ContentRating.SAFE,
-			ContentRating.ADULT,
 		),
 		availableContentTypes = EnumSet.of(
 			ContentType.MANGA,
 			ContentType.MANHWA,
 			ContentType.MANHUA,
-			ContentType.COMICS,
 		),
 	)
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val url = "$apiUrl/api/mangas/search".toHttpUrl().newBuilder().apply {
+		val url = "$apiUrl/api/works".toHttpUrl().newBuilder().apply {
 			addQueryParameter("page", page.toString())
 			addQueryParameter("limit", PAGE_SIZE.toString())
 
@@ -117,186 +109,121 @@ internal class GeassComics(context: MangaLoaderContext) :
 			}
 
 			typeToApi(filter.types.firstOrNull())?.nullIfEmpty()?.let {
-				addQueryParameter("type", it)
-			}
-
-			when (filter.contentRating.singleOrNull()) {
-				ContentRating.ADULT -> addQueryParameter("nsfw", "true")
-				ContentRating.SAFE -> addQueryParameter("nsfw", "false")
-				else -> Unit
+				addQueryParameter("types", it)
 			}
 
 			val selectedGenres = filter.tags.filter { it.key.startsWith(GENRE_PREFIX) }
 			if (selectedGenres.isNotEmpty()) {
-				addQueryParameter("genres", selectedGenres.joinToString(",") { it.key.removePrefix(GENRE_PREFIX) })
-			}
-
-			val selectedTags = filter.tags.filter { it.key.startsWith(TAG_PREFIX) }
-			if (selectedTags.isNotEmpty()) {
-				addQueryParameter("tags", selectedTags.joinToString(",") { it.key.removePrefix(TAG_PREFIX) })
+				addQueryParameter("genre", selectedGenres.first().key.removePrefix(GENRE_PREFIX))
 			}
 		}.build()
 
 		val response = webClient.httpGet(url, getApiHeaders()).parseJson()
-		val data = response.optJSONArray("data") ?: JSONArray()
+		val data = response.optJSONObject("data")?.optJSONArray("items") ?: JSONArray()
 		return data.mapJSONNotNull { json -> parseManga(json) }
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
 		val slug = manga.url.removePrefix("/manga/").substringAfterLast('/')
-		val response = webClient.httpGet("$apiUrl/api/mangas/$slug", getApiHeaders()).parseJson()
+		val response = webClient.httpGet("$apiUrl/api/works/$slug", getApiHeaders()).parseJson()
 		val data = response.optJSONObject("data") ?: response
 		val parsed = parseManga(data) ?: manga
+		val chapters = data.optJSONArray("chapters")
+			?.mapJSONNotNull { json -> parseChapter(json, slug) }
+			?.reversed()
+			.orEmpty()
 
-		return manga.copy(
-			title = parsed.title.ifBlank { manga.title },
-			altTitles = parsed.altTitles.ifEmpty { manga.altTitles },
-			url = parsed.url,
-			publicUrl = parsed.publicUrl,
-			coverUrl = parsed.coverUrl ?: manga.coverUrl,
-			largeCoverUrl = parsed.largeCoverUrl ?: manga.largeCoverUrl,
-			description = parsed.description ?: manga.description,
-			tags = if (parsed.tags.isNotEmpty()) parsed.tags else manga.tags,
-			authors = if (parsed.authors.isNotEmpty()) parsed.authors else manga.authors,
-			state = parsed.state ?: manga.state,
-			contentRating = parsed.contentRating ?: manga.contentRating,
-			chapters = fetchChapters(
-				mangaId = data.getString("id"),
-				mangaSlug = data.getString("slug"),
-			),
+		return parsed.copy(
+			id = manga.id,
+			chapters = chapters,
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val chapterId = chapter.url.substringAfter("/chapter/").substringBefore('/')
-		val response = webClient.httpGet("$apiUrl/api/chapters/$chapterId", getApiHeaders()).parseJson()
+		val path = chapter.url.removePrefix("/read/").split('/')
+		val slug = path.getOrNull(0).orEmpty()
+		val chapterNumber = path.getOrNull(1).orEmpty()
+		if (slug.isEmpty() || chapterNumber.isEmpty()) return emptyList()
+		val response = webClient.httpGet(
+			"$apiUrl/api/works/$slug/chapters/$chapterNumber",
+			getApiHeaders(),
+		).parseJson()
 		val data = response.optJSONObject("data") ?: response
 		val pages = data.optJSONArray("pages") ?: return emptyList()
 
-		return List(pages.length()) { index -> pages.getJSONObject(index) }
-			.sortedBy { it.optInt("pageNumber", Int.MAX_VALUE) }
-			.map { page ->
-				val imageUrl = page.getString("imageUrl").toAbsoluteApiUrl()
-				MangaPage(
-					id = generateUid(page.getStringOrNull("id") ?: imageUrl),
-					url = imageUrl,
-					preview = null,
-					source = source,
-				)
-			}
-	}
-
-	private suspend fun fetchChapters(mangaId: String, mangaSlug: String): List<MangaChapter> {
-		val chapters = ArrayList<MangaChapter>()
-		var page = 1
-
-		while (true) {
-			val url = "$apiUrl/api/chapters".toHttpUrl().newBuilder()
-				.addQueryParameter("mangaId", mangaId)
-				.addQueryParameter("page", page.toString())
-				.addQueryParameter("limit", CHAPTERS_LIMIT.toString())
-				.addQueryParameter("order", "desc")
-				.build()
-
-			val response = webClient.httpGet(url, getApiHeaders()).parseJson()
-			val data = response.optJSONArray("data") ?: break
-			if (data.length() == 0) break
-
-			chapters += data.mapJSONNotNull { json ->
-				if (!json.getBooleanOrDefault("isPublished", true)) {
-					return@mapJSONNotNull null
-				}
-
-				if (json.getBooleanOrDefault("isVipOnly", false)) {
-					return@mapJSONNotNull null
-				}
-
-				parseChapter(json, mangaSlug)
-			}
-
-			val pagination = response.optJSONObject("pagination")
-			val hasNext = when {
-				pagination == null -> false
-				!pagination.isNull("hasNext") -> pagination.getBooleanOrDefault("hasNext", false)
-				!pagination.isNull("hasNextPage") -> pagination.getBooleanOrDefault("hasNextPage", false)
-				else -> false
-			}
-			if (!hasNext) {
-				break
-			}
-			page++
+		return List(pages.length()) { index ->
+			val imageUrl = pages.getString(index).toAbsoluteApiUrl()
+			MangaPage(
+				id = generateUid("$imageUrl#$index"),
+				url = imageUrl,
+				preview = null,
+				source = source,
+			)
 		}
-
-		return chapters.reversed()
 	}
 
 	private fun parseManga(json: JSONObject): Manga? {
 		val slug = json.getStringOrNull("slug") ?: return null
 		val relativeUrl = "/manga/$slug"
-		val tags = linkedSetOf<MangaTag>().apply {
-			addAll(parseTags(json.optJSONArray("genres"), GENRE_PREFIX))
-			addAll(parseTags(json.optJSONArray("tags"), TAG_PREFIX))
-		}
+		val tags = parseTags(json.optJSONArray("tags"))
 		val authors = linkedSetOf<String>().apply {
-			json.getStringOrNull("author")?.let(::add)
-			json.getStringOrNull("artist")?.let(::add)
+			json.getStringOrNull("author")?.nullIfEmpty()?.let(::add)
 		}
+		val rating = json.optDouble("rating", 0.0)
+			.takeIf { it > 0.0 }
+			?.div(5.0)
+			?.toFloat()
+			?: RATING_UNKNOWN
 		return Manga(
 			id = generateUid(json.getStringOrNull("id") ?: relativeUrl),
 			title = json.getStringOrNull("title").orEmpty(),
-			altTitles = parseAltTitles(json.getStringOrNull("alternativeTitles")),
+			altTitles = emptySet(),
 			url = relativeUrl,
 			publicUrl = "https://$domain/obra/$slug",
-			rating = RATING_UNKNOWN,
+			rating = rating,
 			contentRating = if (json.getBooleanOrDefault("isNsfw", false)) {
 				ContentRating.ADULT
 			} else {
 				ContentRating.SAFE
 			},
-			coverUrl = json.getStringOrNull("coverImage")?.toAbsoluteApiUrl(),
+			coverUrl = json.getStringOrNull("cover")?.toAbsoluteApiUrl(),
 			tags = tags,
 			state = parseState(json.getStringOrNull("status")),
 			authors = authors,
-			largeCoverUrl = json.getStringOrNull("bannerImage")?.toAbsoluteApiUrl(),
-			description = json.getStringOrNull("description"),
+			largeCoverUrl = json.getStringOrNull("coverLarge")?.toAbsoluteApiUrl(),
+			description = json.getStringOrNull("synopsis"),
 			source = source,
 		)
 	}
 
 	private fun parseChapter(json: JSONObject, mangaSlug: String): MangaChapter {
 		val id = json.getString("id")
-		val chapterNumber = json.getStringOrNull("chapterNumber")?.toFloatOrNull() ?: 0f
+		val chapterNumber = json.optDouble("number", 0.0).toFloat()
 		return MangaChapter(
 			id = generateUid(id),
 			title = json.getStringOrNull("title"),
 			number = chapterNumber,
 			volume = 0,
-			url = "/chapter/$id/$mangaSlug/${chapterNumber.formatChapterSuffix()}",
-			scanlator = json.getStringOrNull("uploader"),
-			uploadDate = chapterDateFormat.parseSafe(
-				json.getStringOrNull("createdAt") ?: json.getStringOrNull("updatedAt"),
-			),
+			url = "/read/$mangaSlug/" + chapterNumber.formatChapterSuffix(),
+			scanlator = null,
+			uploadDate = parseChapterDate(json.getStringOrNull("releasedAt")),
 			branch = null,
 			source = source,
 		)
 	}
 
-	private fun parseTags(array: JSONArray?, prefix: String): Set<MangaTag> {
+	private fun parseTags(array: JSONArray?): Set<MangaTag> {
 		if (array == null) return emptySet()
-		return array.mapJSONToSet { json ->
-			MangaTag(
-				key = prefix + json.getString("id"),
-				title = json.getString("name"),
-				source = source,
-			)
-		}
-	}
-
-	private fun parseAltTitles(raw: String?): Set<String> {
-		return raw?.split(Regex("""[\r\n;]+"""))
-			?.mapNotNull { it.trim().nullIfEmpty() }
-			?.toSet()
-			.orEmpty()
+		return List(array.length()) { index -> array.getString(index) }
+			.mapNotNull { title ->
+				val cleanTitle = cleanTagTitle(title).nullIfEmpty() ?: return@mapNotNull null
+				MangaTag(
+					key = TAG_PREFIX + cleanTitle.toApiSlug(),
+					title = cleanTitle,
+					source = source,
+				)
+			}
+			.toSet()
 	}
 
 	private fun parseState(status: String?): MangaState? = when (status?.trim()?.lowercase(Locale.ROOT)) {
@@ -308,18 +235,17 @@ internal class GeassComics(context: MangaLoaderContext) :
 	}
 
 	private fun sortToApi(order: SortOrder, query: String?): List<Pair<String, String>> = when (order) {
-		SortOrder.POPULARITY -> listOf("sort" to "views", "order" to "desc")
-		SortOrder.UPDATED -> listOf("sort" to "updatedAt", "order" to "desc")
-		SortOrder.NEWEST -> listOf("sort" to "createdAt", "order" to "desc")
-		SortOrder.ALPHABETICAL -> listOf("sort" to "title", "order" to "asc")
-		SortOrder.ALPHABETICAL_DESC -> listOf("sort" to "title", "order" to "desc")
+		SortOrder.POPULARITY -> listOf("sortBy" to "rating", "sortDir" to "desc")
+		SortOrder.UPDATED, SortOrder.NEWEST -> listOf("sortBy" to "recent", "sortDir" to "desc")
+		SortOrder.ALPHABETICAL -> listOf("sortBy" to "title", "sortDir" to "asc")
+		SortOrder.ALPHABETICAL_DESC -> listOf("sortBy" to "title", "sortDir" to "desc")
 		SortOrder.RELEVANCE -> if (query.isNullOrBlank()) {
-			listOf("sort" to "views", "order" to "desc")
+			listOf("sortBy" to "recent", "sortDir" to "desc")
 		} else {
 			emptyList()
 		}
 
-		else -> listOf("sort" to "views", "order" to "desc")
+		else -> listOf("sortBy" to "recent", "sortDir" to "desc")
 	}
 
 	private fun stateToApi(state: MangaState?): String? = when (state) {
@@ -346,28 +272,39 @@ internal class GeassComics(context: MangaLoaderContext) :
 		val genres = webClient.httpGet("$apiUrl/api/genres", getApiHeaders()).parseJson()
 			.optJSONArray("data")
 			?.mapJSONNotNull { json ->
+				val title = cleanTagTitle(json.getString("label")).nullIfEmpty() ?: return@mapJSONNotNull null
 				MangaTag(
-					key = GENRE_PREFIX + json.getString("id"),
-					title = json.getString("name"),
+					key = GENRE_PREFIX + json.getString("slug"),
+					title = title,
 					source = source,
 				)
 			}
 			.orEmpty()
 
-		val tags = webClient.httpGet("$apiUrl/api/tags", getApiHeaders()).parseJson()
-			.optJSONArray("data")
-			?.mapJSONNotNull { json ->
-				MangaTag(
-					key = TAG_PREFIX + json.getString("id"),
-					title = json.getString("name"),
-					source = source,
-				)
-			}
-			.orEmpty()
+		return genres
+			.distinctBy { it.title }
+			.sortedBy { it.title }
+			.toCollection(LinkedHashSet())
+	}
 
-		return linkedSetOf<MangaTag>().apply {
-			addAll(genres)
-			addAll(tags)
+	private fun cleanTagTitle(raw: String): String = raw
+		.replace(Regex("""\s+"""), " ")
+		.replace(Regex("""\s*\(\d+\)$"""), "")
+		.trim()
+		.replaceFirstChar { char -> char.titlecase(Locale.ROOT) }
+
+	private fun String.toApiSlug(): String = Normalizer.normalize(this, Normalizer.Form.NFD)
+		.replace(Regex("""\p{Mn}+"""), "")
+		.lowercase(Locale.ROOT)
+		.replace(Regex("""[^a-z0-9]+"""), "-")
+		.trim('-')
+
+	private fun parseChapterDate(raw: String?): Long {
+		if (raw.isNullOrBlank()) return 0L
+		return synchronized(chapterDateFormats) {
+			chapterDateFormats.firstNotNullOfOrNull { format ->
+				format.parseSafe(raw).takeIf { it != 0L }
+			} ?: 0L
 		}
 	}
 
@@ -385,13 +322,16 @@ internal class GeassComics(context: MangaLoaderContext) :
 
 	private companion object {
 		private const val PAGE_SIZE = 24
-		private const val CHAPTERS_LIMIT = 100
-		private const val apiUrl = "https://api.skkyscan.fun"
+		private const val apiUrl = "https://api.geasscomics.xyz"
 		private const val GENRE_PREFIX = "genre:"
 		private const val TAG_PREFIX = "tag:"
 
-		private val chapterDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply {
-			timeZone = java.util.TimeZone.getTimeZone("UTC")
+		private val chapterDateFormats = listOf(
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.ROOT),
+			SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.ROOT),
+			SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT),
+		).onEach {
+			it.timeZone = java.util.TimeZone.getTimeZone("UTC")
 		}
 	}
 }

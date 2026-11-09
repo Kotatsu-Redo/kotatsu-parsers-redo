@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers.site.en
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.bitmap.Bitmap
@@ -91,15 +92,16 @@ internal class MangagoParser(context: MangaLoaderContext) :
 
     override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
         if (!filter.query.isNullOrEmpty()) {
-            val url = buildString {
-                append("https://")
-                append(domain)
-                append("/r/l_search?name=")
-                append(filter.query.urlEncoded())
-                append("&page=")
-                append(page)
+            val results = search(filter.query, page)
+            if (page != paginator.firstPage) {
+                return results
             }
-            return parseMangaList(webClient.httpGet(url).parseHtml())
+            // The site matches anywhere in the name, author and summary without ranking, which can bury a title
+            // that is exactly the query. Its titles are stored with this label, so asking for that finds them.
+            val exact = runCatchingCancellable { search("${filter.query}$YAOI_LABEL", page) }
+                .getOrDefault(emptyList())
+                .filter { it.title.equals(filter.query, ignoreCase = true) }
+            return (exact + results).distinctBy { it.id }
         }
 
         val url = when (order) {
@@ -160,6 +162,10 @@ internal class MangagoParser(context: MangaLoaderContext) :
             val title = linkElement.attr("title").ifEmpty {
                 linkElement.selectFirst("h2 a")?.text() ?: return@mapNotNull null
             }
+            // Removed uploads are filed under a "DELETE" title, which the site's own search leaves out
+            if (title == DELETED_UPLOADS_TITLE && DELETED_UPLOADS_URL_REGEX.containsMatchIn(href)) {
+                return@mapNotNull null
+            }
             val thumbnailElem = linkElement.selectFirst("img") ?: return@mapNotNull null
             val thumbnailUrl = thumbnailElem.attr("abs:data-src").ifEmpty {
                 thumbnailElem.attr("abs:src")
@@ -181,14 +187,27 @@ internal class MangagoParser(context: MangaLoaderContext) :
                 contentRating = ContentRating.SAFE,
                 source = source,
             )
+        }.distinctBy { it.url } // desktop pages nest .box inside .pic_list > li, both match
+    }
+
+    private suspend fun search(query: String, page: Int): List<Manga> {
+        val url = buildString {
+            append("https://")
+            append(domain)
+            append("/r/l_search?name=")
+            append(query.urlEncoded())
+            append("&page=")
+            append(page)
         }
+        return parseMangaList(webClient.httpGet(url).parseHtml())
     }
 
     override suspend fun getDetails(manga: Manga): Manga {
-        val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+        val doc = loadDetailsPage(manga.url.toAbsoluteUrl(domain))
         val infoBlock = doc.requireElementById("information")
 
-        val title = doc.selectFirstOrThrow(".w-title h1").text()
+        // The lists show the title without the label the details page adds
+        val title = doc.selectFirstOrThrow(".w-title h1").text().removeSuffix(YAOI_LABEL)
         val thumbnail = infoBlock.selectFirstOrThrow("img").absUrl("src")
 
         var description = infoBlock.selectFirst(".manga_summary")?.let { summary ->
@@ -239,10 +258,46 @@ internal class MangagoParser(context: MangaLoaderContext) :
         val scanlator: String?,
     )
 
+    /**
+     * Titles that the site also offers on its partner reader get their chapter links rewritten on a random share of
+     * the title pages it serves (about half of them for some titles, in both layouts): every link then points at a
+     * partner host, `www.mangago.zone/chapter/84380/2382390/` or `www.youhim.me/chapter/84380/2382390/` (the host
+     * picked per link), instead of the site's own reader, `www.mangago.me/read-manga/<slug>/uu/nml_chapter-45/pg-1/`.
+     * Nothing in the page ties the two forms together and chapter ids are made from the link, so taking such a page
+     * gives every chapter of the title another id for that load, and the app loses the reading position (and the
+     * branch it was read in). Ask again until the links are the site's own ones, then make do with the last page.
+     */
+    private suspend fun loadDetailsPage(url: String): Document {
+        var doc = webClient.httpGet(url).parseHtml()
+        var attempts = 1
+        while (attempts < DETAILS_PAGE_ATTEMPTS && doc.hasPartnerChapterLinks()) {
+            doc = webClient.httpGet(url).parseHtml()
+            attempts++
+        }
+        return doc
+    }
+
+    private fun Document.chapterRows() = select("table#chapter_table > tbody > tr, table.uk-table > tbody > tr")
+
+    private fun Element.chapterLink(): Element? = selectFirst("a.chico")
+
+    private fun Document.hasPartnerChapterLinks(): Boolean = chapterRows().any { row ->
+        row.chapterLink()?.attrAsAbsoluteUrlOrNull("href")?.let(::partnerChapterPath) != null
+    }
+
+    /** `/chapter/<title>/<chapter>/` for a link to the partner reader, null for the site's own reader. */
+    private fun partnerChapterPath(url: String): String? = PARTNER_CHAPTER_REGEX.find(url)?.groupValues?.get(1)
+
+    /**
+     * What a chapter id is made from: the link, without its host when it goes to the partner reader since that
+     * host is picked at random on every load. Links to the site's own reader are kept whole, as ids always were.
+     */
+    private fun chapterKey(url: String): String = partnerChapterPath(url) ?: url
+
     private fun parseChapterList(doc: Document): List<MangaChapter> {
-        val rawChapters = doc.select("table#chapter_table > tbody > tr, table.uk-table > tbody > tr")
+        val rawChapters = doc.chapterRows()
             .mapNotNull { element ->
-                val link = element.selectFirst("a.chico") ?: return@mapNotNull null
+                val link = element.chapterLink() ?: return@mapNotNull null
                 val url = link.attrAsAbsoluteUrlOrNull("href") ?: return@mapNotNull null
                 val name = link.text().trim()
 
@@ -262,87 +317,147 @@ internal class MangagoParser(context: MangaLoaderContext) :
     }
 
     private fun buildChapterList(chapters: List<ChapterParseData>): List<MangaChapter> {
-        // Count scanlator occurrences to determine the most common one
-        val scanlatorCounts = mutableMapOf<String, Int>()
-        for (chapter in chapters) {
-            val scanlator = chapter.scanlator ?: extractTitleSuffix(chapter.name) ?: continue
-            scanlatorCounts[scanlator] = (scanlatorCounts[scanlator] ?: 0) + 1
+        val canonicalScanlators = LinkedHashMap<String, String>()
+        val resolvedChapters = chapters.distinctBy { it.url }.map { chapter ->
+            // Only the uploader column names a group: the title suffix is the chapter name ("Chapter 109", "END"...)
+            val name = chapter.scanlator
+                ?.replace(WHITESPACE_REGEX, " ")
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+            val canonicalName = name?.let {
+                canonicalScanlators.getOrPut(it.lowercase(Locale.ROOT)) { it }
+            }
+            chapter.copy(scanlator = canonicalName)
         }
-        val preferredScanlator = scanlatorCounts.maxByOrNull { it.value }?.key
+        val rawGroups = resolvedChapters.groupByTo(LinkedHashMap()) { it.scanlator ?: UNKNOWN_SCANLATOR }
+        // Uploaders without any numbered chapter (notices, announcements) are not worth a branch
+        val groups = LinkedHashMap<String, MutableList<ChapterParseData>>()
+        for ((name, group) in rawGroups) {
+            val key = if (group.none { extractChapterNumber(it.name) != null }) UNKNOWN_SCANLATOR else name
+            groups.getOrPut(key) { ArrayList() }.addAll(group)
+        }
+        if (groups.size <= 1) {
+            return buildScanlatorBranch(selectChapters(resolvedChapters), null, emptyList(), emptyMap())
+        }
+        // Each chapter keeps its historical id in the branch of its uploader
+        val primaryBranch = HashMap<String, String>()
+        groups.forEach { (branch, group) -> group.forEach { primaryBranch[it.url] = branch } }
 
-        val regularChapters = mutableMapOf<Float, ChapterParseData>()
+        val selected = groups.mapValuesTo(LinkedHashMap()) { (_, group) -> selectChapters(group) }
+        // Official releases are often uploaded by several accounts: they are also gathered in a single branch
+        val official = resolvedChapters.filter(::isOfficial)
+        val officialBranch = if (official.isNotEmpty()) {
+            OFFICIAL_BRANCH to SelectedChapters(selectChapters(official).regular, emptyList())
+        } else {
+            null
+        }
+
+        // Missing chapters of a branch are filled from official releases first, then from the largest uploaders
+        val branches = listOfNotNull(officialBranch) + selected.entries
+            .sortedByDescending { it.value.regular.size }
+            .map { it.key to it.value }
+        val donors = branches.map { (branch, chapters) -> branch to chapters.regular }
+
+        return branches
+            .map { (branch, chapters) -> buildScanlatorBranch(chapters, branch, donors, primaryBranch) }
+            .flatten()
+    }
+
+    private class SelectedChapters(
+        val regular: Map<Float, ChapterParseData>,
+        val special: List<ChapterParseData>,
+    )
+
+    private fun selectChapters(chapters: List<ChapterParseData>): SelectedChapters {
+        val regularChapters = LinkedHashMap<Float, ChapterParseData>()
         val specialChapters = mutableListOf<ChapterParseData>()
 
         for (chapter in chapters) {
             val chapterNum = extractChapterNumber(chapter.name)
             if (chapterNum != null) {
                 val existing = regularChapters[chapterNum]
-                if (existing == null) {
+                if (
+                    existing == null ||
+                    chapter.dateUpload > existing.dateUpload ||
+                    chapter.dateUpload == existing.dateUpload && chapter.name.length > existing.name.length
+                ) {
                     regularChapters[chapterNum] = chapter
-                } else {
-                    // Prefer the chapter from the most common scanlator for consistency
-                    val existingSource = existing.scanlator ?: extractTitleSuffix(existing.name)
-                    val newSource = chapter.scanlator ?: extractTitleSuffix(chapter.name)
-
-                    val existingIsPreferred = existingSource == preferredScanlator
-                    val newIsPreferred = newSource == preferredScanlator
-
-                    if (newIsPreferred && !existingIsPreferred) {
-                        regularChapters[chapterNum] = chapter
-                    } else if (!newIsPreferred && existingIsPreferred) {
-                        // Keep existing
-                    } else {
-                        // Same source priority, prefer longer title
-                        if (chapter.name.length > existing.name.length) {
-                            regularChapters[chapterNum] = chapter
-                        }
-                    }
                 }
             } else {
-                // Non-standard chapters (Special, Extra, etc.) go to special list
                 specialChapters.add(chapter)
             }
         }
+        return SelectedChapters(regularChapters, specialChapters)
+    }
+
+    private fun isOfficial(chapter: ChapterParseData): Boolean =
+        chapter.scanlator?.contains(OFFICIAL_REGEX) == true ||
+            extractTitleSuffix(chapter.name)?.contains(OFFICIAL_REGEX) == true
+
+    private fun buildScanlatorBranch(
+        chapters: SelectedChapters,
+        branch: String?,
+        donors: List<Pair<String, Map<Float, ChapterParseData>>>,
+        primaryBranch: Map<String, String>,
+    ): List<MangaChapter> {
+        // Own uploads first, then only the missing numbers are taken from other branches
+        val regularChapters = HashMap<Float, ChapterParseData>(chapters.regular)
+        for ((donorBranch, donorChapters) in donors) {
+            if (donorBranch == branch) continue
+            donorChapters.forEach { (number, chapter) ->
+                regularChapters.putIfAbsent(number, chapter)
+            }
+        }
+        val specialChapters = chapters.special
 
         val result = mutableListOf<MangaChapter>()
 
-        // Add regular chapters sorted by number
         val sortedRegular = regularChapters.entries.sortedBy { it.key }
         for ((chapterNum, chapter) in sortedRegular) {
             result.add(
                 MangaChapter(
-                    id = generateUid(chapter.url),
+                    // The same chapter can appear in several branches, ids must stay unique per manga
+                    id = chapterId(chapter, branch, primaryBranch),
                     url = chapter.url,
                     title = chapter.name,
                     number = chapterNum,
                     volume = 0,
                     uploadDate = chapter.dateUpload,
                     scanlator = chapter.scanlator,
-                    branch = null,
+                    branch = branch,
                     source = source,
                 ),
             )
         }
 
-        // Add special chapters at the end with high numbers
         val baseSpecialNumber = (regularChapters.keys.maxOrNull() ?: 0f) + 10000f
         for ((index, chapter) in specialChapters.withIndex()) {
             result.add(
                 MangaChapter(
-                    id = generateUid(chapter.url),
+                    id = generateUid(chapterKey(chapter.url)),
                     url = chapter.url,
                     title = chapter.name,
                     number = baseSpecialNumber + index,
                     volume = 0,
                     uploadDate = chapter.dateUpload,
                     scanlator = chapter.scanlator,
-                    branch = null,
+                    branch = branch,
                     source = source,
                 ),
             )
         }
 
         return result
+    }
+
+    private fun chapterId(chapter: ChapterParseData, branch: String?, primaryBranch: Map<String, String>): Long {
+        val primary = primaryBranch[chapter.url]
+        val key = chapterKey(chapter.url)
+        return if (primary == null || primary == branch) {
+            generateUid(key)
+        } else {
+            generateUid("$key#$branch")
+        }
     }
 
     private fun extractTitleSuffix(title: String): String? {
@@ -556,10 +671,12 @@ internal class MangagoParser(context: MangaLoaderContext) :
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
+        // Taken from the request as sent: scrambled pages get redirected to another host (iweb6 to iweb7), and
+        // the request a redirect ends on has no fragment any more
+        val fragment = chain.request().url.fragment
         val response = chain.proceed(chain.request())
-        val fragment = response.request.url.fragment
 
-        if (fragment == null || !fragment.contains("desckey=")) {
+        if (fragment == null || !fragment.contains("desckey=") || !response.isSuccessful) {
             return response
         }
 
@@ -689,41 +806,53 @@ internal class MangagoParser(context: MangaLoaderContext) :
         return s
     }
 
-    private suspend fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
-        val imgkeys = deobfChapterJs
+    /**
+     * The key `renImg` in chapter.js picks for an image: from a table of hashes looked up in the file name, scrambled
+     * for two more hashes, a default one otherwise. Read here instead of running that code in a WebView, which would
+     * load the site once per page before the reader can open, and returns its result as a quoted JSON string.
+     */
+    private fun getDescramblingKey(deobfChapterJs: String, imageUrl: String): String {
+        val script = deobfChapterJs
             .substringAfter("var renImg = function(img,width,height,id){", "")
             .substringBefore("key = key.split(", "")
-            .split("\n")
-            .filter { line -> JS_FILTERS.none { filter -> line.contains(filter) } }
-            .joinToString("\n")
-            .replace("img.src", "url")
 
-        if (imgkeys.isEmpty()) {
-            throw Exception("Failed to extract image key extraction code from chapter.js")
-        }
+        var key = DEFAULT_IMAGE_KEY_REGEX.find(script)?.groupValues?.get(1)
+            ?: throw Exception("Failed to find the image key in chapter.js")
 
-        val js = """
-            function replacePos(strObj, pos, replacetext) {
-                var str = strObj.substr(0, pos) + replacetext + strObj.substring(pos + 1, strObj.length);
-                return str;
+        IMAGE_KEY_TABLE_REGEX.findAll(script).forEach { entry ->
+            if (entry.groupValues[1] in imageUrl) {
+                key = entry.groupValues[2]
             }
-            function getDescramblingKey(url) { $imgkeys; return key; }
-            getDescramblingKey("$imageUrl");
-        """.trimIndent()
-
-        val result = context.evaluateJs("https://$domain/", js, 10000L)
-
-        if (result.isNullOrEmpty()) {
-            throw Exception("Failed to evaluate JavaScript to get descrambling key. The image format or site structure may have changed.")
         }
 
-        return result
+        SCRAMBLED_IMAGE_KEYS_REGEX.find(script)?.let { keys ->
+            val (firstHash, secondHash, firstKey, secondKey) = keys.destructured
+            when {
+                firstHash in imageUrl -> key = unscrambleImageList(firstKey, deobfChapterJs)
+                secondHash in imageUrl -> key = unscrambleImageList(secondKey, deobfChapterJs)
+            }
+        }
+
+        return key
     }
 
     private companion object {
         private val IMG_SRCS_REGEX = Regex("""var imgsrcs\s*=\s*['"]([a-zA-Z0-9+=/]+)['"]""")
         private val COLS_REGEX = Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
         private val KEY_LOCATION_REGEX = Regex("""str\.charAt\(\s*(\d+)\s*\)""")
-        private val JS_FILTERS = listOf("jQuery", "document", "getContext", "toDataURL", "getImageData", "width", "height")
+        private val DEFAULT_IMAGE_KEY_REGEX = Regex("""var\s+key\s*=\s*"([0-9a]+)"""")
+        private val IMAGE_KEY_TABLE_REGEX = Regex("""_imgkeys_\["([0-9a-f]+)"]\s*=\s*"([0-9a]+)"""")
+        private val SCRAMBLED_IMAGE_KEYS_REGEX = Regex(
+            """indexOf\("([0-9a-f]+)"\)>0\|\|img\.src\.indexOf\("([0-9a-f]+)"\)>0\)\s*\{\s*var\s+\w+\s*=\s*img\.src\.indexOf\("[0-9a-f]+"\)>0\?"([0-9a]+)":"([0-9a]+)"""",
+        )
+        private val WHITESPACE_REGEX = Regex("""\s+""")
+        private const val UNKNOWN_SCANLATOR = "Unknown"
+        private const val OFFICIAL_BRANCH = "Official"
+        private val OFFICIAL_REGEX = Regex("""\bofficial\b""", RegexOption.IGNORE_CASE)
+        private val PARTNER_CHAPTER_REGEX = Regex("""^https?://[^/]+(/chapter/\d+/\d+/?)$""")
+        private const val DETAILS_PAGE_ATTEMPTS = 5
+        private const val YAOI_LABEL = " (Yaoi)"
+        private const val DELETED_UPLOADS_TITLE = "DELETE"
+        private val DELETED_UPLOADS_URL_REGEX = Regex("""/read-manga/delete_\d+/?$""")
     }
 }

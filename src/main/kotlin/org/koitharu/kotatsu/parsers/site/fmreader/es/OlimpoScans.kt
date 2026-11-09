@@ -8,6 +8,7 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.NotFoundException
 import org.koitharu.kotatsu.parsers.model.ContentRating
 import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaChapter
@@ -20,10 +21,15 @@ import org.koitharu.kotatsu.parsers.model.MangaState
 import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
 import org.koitharu.kotatsu.parsers.model.SortOrder
+import org.koitharu.kotatsu.parsers.util.attrAsAbsoluteUrl
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.nullIfEmpty
+import org.koitharu.kotatsu.parsers.util.oneOrThrowIfMany
+import org.koitharu.kotatsu.parsers.util.parseFailed
+import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.parseJson
 import org.koitharu.kotatsu.parsers.util.parseSafe
+import org.koitharu.kotatsu.parsers.util.toTitleCase
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
@@ -33,7 +39,7 @@ import java.util.TimeZone
 internal class OlimpoScans(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.OLIMPOSCANS, 24, 100) {
 
-	override val configKeyDomain = ConfigKey.Domain("olympusbiblioteca.com")
+	override val configKeyDomain = ConfigKey.Domain("olympusxyz.com", "olympusbiblioteca.com")
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -58,7 +64,6 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = MangaListFilterCapabilities(
 			isSearchSupported = true,
-			isMultipleTagsSupported = true,
 		)
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
@@ -84,13 +89,14 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val slug = manga.url.substringAfterLast('/')
-		val root = webClient.httpGet(detailsUrl(slug), getRequestHeaders()).parseJson()
+		// A link to the site carries the public form of the slug, "comic-<slug>"
+		val slug = manga.url.substringAfterLast('/').removePrefix("comic-")
+		val (currentSlug, root) = fetchSeriesDetails(slug, manga.title)
 		val data = root.optJSONObject("data") ?: return manga
 		return manga.copy(
 			title = data.optString("name").ifBlank { manga.title },
 			url = buildMangaUrl(slug),
-			publicUrl = publicMangaUrl(slug),
+			publicUrl = publicMangaUrl(currentSlug),
 			coverUrl = data.optString("cover").nullIfEmpty() ?: manga.coverUrl,
 			description = data.optString("summary").nullIfEmpty(),
 			tags = parseGenres(data.optJSONArray("genres")),
@@ -98,23 +104,55 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 			authors = parseAuthors(data.opt("team")),
 			rating = parseRating(data),
 			contentRating = ContentRating.SAFE,
-			chapters = fetchChapters(slug),
+			chapters = fetchChapters(currentSlug, slug),
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val slug = chapter.url.substringAfter("/chapter/").substringBeforeLast("/")
 		val chapterId = chapter.url.substringAfterLast("/")
-		val root = webClient.httpGet(chapterPagesUrl(slug, chapterId), getRequestHeaders()).parseJson()
-		val pages = root.optJSONObject("chapter")?.optJSONArray("pages") ?: return emptyList()
-		return List(pages.length()) { index ->
-			val imageUrl = pages.optString(index)
+		// This route finds the chapter by its id alone and redirects to the reader, so it keeps
+		// working for chapter urls that hold an old slug. The site's JSON endpoint wants the current
+		// slug and the chapter's name.
+		val doc = webClient.httpGet(siteUrl("capitulo/$chapterId/comic-$slug"), getRequestHeaders()).parseHtml()
+		val images = doc.select("main.strip div.panel > img")
+		if (images.isEmpty()) {
+			doc.parseFailed("No page images at ${chapter.url}")
+		}
+		return images.mapIndexed { index, image ->
 			MangaPage(
 				id = generateUid("$chapterId-$index"),
-				url = imageUrl,
+				url = image.attrAsAbsoluteUrl("src"),
 				preview = null,
 				source = source,
 			)
+		}
+	}
+
+	/**
+	 * The site renames slugs (204 of its series got a new one on 2026-11-01) and answers 404 for the
+	 * old one, so a saved manga is looked up again by its title. Returns the slug that worked.
+	 */
+	private suspend fun fetchSeriesDetails(slug: String, title: String): Pair<String, JSONObject> {
+		try {
+			return slug to webClient.httpGet(detailsUrl(slug), getRequestHeaders()).parseJson()
+		} catch (e: NotFoundException) {
+			val currentSlug = findCurrentSlug(slug, title) ?: throw e
+			return currentSlug to webClient.httpGet(detailsUrl(currentSlug), getRequestHeaders()).parseJson()
+		}
+	}
+
+	private suspend fun findCurrentSlug(staleSlug: String, title: String): String? {
+		suspend fun lookup() = fetchSeriesList()
+			.firstOrNull { it.optString("name").trim().equals(title.trim(), ignoreCase = true) }
+			?.optString("slug")
+			?.nullIfEmpty()
+			?.takeUnless { it == staleSlug }
+
+		// The cached list may predate the rename
+		return lookup() ?: run {
+			seriesListCache = null
+			lookup()
 		}
 	}
 
@@ -128,7 +166,7 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	}
 
 	private suspend fun browse(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val url = apiUrl("api/series").newBuilder()
+		val url = siteUrl("api/series").newBuilder()
 			.addQueryParameter("type", "comic")
 			.addQueryParameter("page", page.toString())
 
@@ -136,8 +174,9 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 			url.addQueryParameter("direction", "asc")
 		}
 
-		if (filter.tags.isNotEmpty()) {
-			url.addQueryParameter("genres", filter.tags.joinToString(",") { it.key })
+		// The site accepts a single genre id here and answers 400 to anything else
+		filter.tags.oneOrThrowIfMany()?.let { tag ->
+			url.addQueryParameter("genres", tag.key)
 		}
 
 		filter.states.firstOrNull()?.let { state ->
@@ -173,12 +212,12 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 		return parseSeriesList(items).distinctBy { it.url }
 	}
 
-	private suspend fun fetchChapters(slug: String): List<MangaChapter> {
+	private suspend fun fetchChapters(slug: String, urlSlug: String): List<MangaChapter> {
 		val result = ArrayList<MangaChapter>()
 		var page = 1
 		var lastPage = 1
 		do {
-			val url = apiUrl("api/series/$slug/chapters").newBuilder()
+			val url = siteUrl("api/series/$slug/chapters").newBuilder()
 				.addQueryParameter("page", page.toString())
 				.addQueryParameter("direction", "desc")
 				.addQueryParameter("type", "comic")
@@ -186,7 +225,7 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 			val root = webClient.httpGet(url, getRequestHeaders()).parseJson()
 			val items = root.optJSONArray("data") ?: JSONArray()
 			result += List(items.length()) { index ->
-				parseChapter(slug, items.getJSONObject(index))
+				parseChapter(urlSlug, items.getJSONObject(index))
 			}
 			lastPage = root.optJSONObject("meta")?.optInt("last_page").takeIf { it != null && it > 0 } ?: page
 			page += 1
@@ -195,7 +234,7 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	}
 
 	private suspend fun fetchFilters(): Pair<Set<MangaTag>, Map<MangaState, String>> {
-		val root = webClient.httpGet(apiUrl("api/genres-statuses"), getRequestHeaders()).parseJson()
+		val root = webClient.httpGet(siteUrl("api/genres-statuses"), getRequestHeaders()).parseJson()
 		val tags = parseGenres(root.optJSONArray("genres"))
 		val statusMap = LinkedHashMap<MangaState, String>(4)
 		val statuses = root.optJSONArray("statuses") ?: JSONArray()
@@ -204,7 +243,8 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 			val id = item.opt("id")?.toString().orEmpty()
 			if (id.isBlank()) continue
 			val state = parseState(item.optString("name")) ?: continue
-			statusMap[state] = id
+			// Two site statuses map to ABANDONED; the filter takes one id, so keep the first
+			statusMap.getOrPut(state) { id }
 		}
 		return tags to statusMap
 	}
@@ -271,14 +311,15 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 			val item = items.optJSONObject(i) ?: continue
 			val id = item.opt("id")?.toString().orEmpty()
 			if (id.isBlank()) continue
-			val title = item.optString("name").trim().nullIfEmpty() ?: continue
+			val title = item.optString("name").trim().toTitleCase(sourceLocale).nullIfEmpty() ?: continue
 			result += MangaTag(
 				key = id,
 				title = title,
 				source = source,
 			)
 		}
-		return result
+		// The site lists some genres twice under different ids
+		return result.distinctBy { it.title.lowercase(sourceLocale) }.toSet()
 	}
 
 	private fun parseAuthors(team: Any?): Set<String> {
@@ -296,8 +337,10 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 		return when (value?.trim()?.lowercase(sourceLocale)) {
 			"activo", "activa", "emision", "en emision", "publicandose", "publicándose" -> MangaState.ONGOING
 			"completado", "completa", "finalizado", "finalizada" -> MangaState.FINISHED
-			"hiato", "pausado", "pausada" -> MangaState.PAUSED
-			"cancelado", "cancelada", "abandonado", "abandonada" -> MangaState.ABANDONED
+			"hiato", "pausado", "pausada", "pausado por el autor (hiatus)" -> MangaState.PAUSED
+			"cancelado", "cancelada", "abandonado", "abandonada",
+			"cancelado por el autor", "abandonado por el scan",
+			-> MangaState.ABANDONED
 			"proximamente", "próximamente", "proximo", "próximo" -> MangaState.UPCOMING
 			else -> null
 		}
@@ -325,10 +368,6 @@ internal class OlimpoScans(context: MangaLoaderContext) :
 	private fun detailsUrl(slug: String) = siteUrl("api/series/$slug").newBuilder()
 		.addQueryParameter("type", "comic")
 		.build()
-
-	private fun chapterPagesUrl(slug: String, chapterId: String) = siteUrl("api/capitulo/comic-$slug/$chapterId")
-
-	private fun apiUrl(path: String) = "https://dashboard.$domain/${path.removePrefix("/")}".toHttpUrl()
 
 	private fun siteUrl(path: String) = "https://$domain/${path.removePrefix("/")}".toHttpUrl()
 

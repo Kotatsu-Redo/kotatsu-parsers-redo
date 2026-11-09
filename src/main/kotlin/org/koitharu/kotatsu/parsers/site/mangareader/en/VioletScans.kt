@@ -5,6 +5,9 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@MangaSourceParser("ELFTOON", "Elftoon", "en")
-internal class Elftoon(context: MangaLoaderContext) :
-    MangaReaderParser(context, MangaParserSource.ELFTOON, "elftoon.com", pageSize = 20, searchPageSize = 10)
+@MangaSourceParser("VIOLETSCANS", "VioletScans", "en")
+internal class VioletScans(context: MangaLoaderContext) :
+	MangaReaderParser(context, MangaParserSource.VIOLETSCANS, "violetmanga.com", pageSize = 20, searchPageSize = 10) {
+
+	override val listUrl = "/comics"
+}

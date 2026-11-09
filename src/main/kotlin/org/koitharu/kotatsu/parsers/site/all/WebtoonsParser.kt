@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers.site.all
 import androidx.collection.arraySetOf
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import okhttp3.HttpUrl
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -66,6 +67,37 @@ internal abstract class WebtoonsParser(
 			"zh" -> "zh-hant"
 			else -> tag
 		}
+
+	// Locale routing between sibling sources is done by LinkResolver ranking.
+	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
+		val segments = link.pathSegments
+		if (segments.firstOrNull() != languageCode || segments.size < 4) return null
+		if (segments.last() != "list" && segments.last() != "viewer") return null
+		val titleNo = link.queryParameter("title_no")?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+		// Viewer links point to an episode: normalize them to the series page
+		val seriesUrl = link.newBuilder()
+			.encodedPath("/" + link.encodedPathSegments.take(3).joinToString("/") + "/list")
+			.query(null)
+			.addQueryParameter("title_no", titleNo.toString())
+			.fragment(null)
+			.build()
+		return getDetails(stubManga(titleNo, seriesUrl.toString()))
+	}
+
+	private fun stubManga(titleNo: Long, publicUrl: String) = Manga(
+		id = generateUid(titleNo),
+		title = "",
+		altTitles = emptySet(),
+		url = titleNo.toString(),
+		publicUrl = publicUrl,
+		rating = RATING_UNKNOWN,
+		contentRating = null,
+		coverUrl = "",
+		tags = emptySet(),
+		state = null,
+		authors = emptySet(),
+		source = source,
+	)
 
 	private suspend fun fetchEpisodes(titleNo: Long, type: String): List<MangaChapter> {
 		val url = "https://$mobileApiDomain/api/v1/$type/$titleNo/episodes?pageSize=99999"

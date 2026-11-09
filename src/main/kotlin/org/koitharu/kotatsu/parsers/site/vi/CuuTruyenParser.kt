@@ -1,245 +1,142 @@
 package org.koitharu.kotatsu.parsers.site.vi
 
-import androidx.collection.arraySetOf
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Response
-import okio.IOException
-import org.koitharu.kotatsu.parsers.ErrorMessages
+import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
-import org.koitharu.kotatsu.parsers.bitmap.Bitmap
-import org.koitharu.kotatsu.parsers.bitmap.Rect
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
-import org.koitharu.kotatsu.parsers.network.UserAgents
-import org.koitharu.kotatsu.parsers.util.*
-import org.koitharu.kotatsu.parsers.util.json.*
-import java.text.SimpleDateFormat
-import java.util.*
+import org.koitharu.kotatsu.parsers.util.LinkResolver
+import org.koitharu.kotatsu.parsers.util.generateUid
+import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
+import org.koitharu.kotatsu.parsers.util.json.mapJSON
+import org.koitharu.kotatsu.parsers.util.parseJson
+import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
+import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
+import org.koitharu.kotatsu.parsers.util.toTitleCase
+import java.time.OffsetDateTime
+import java.util.EnumSet
 
 @MangaSourceParser("CUUTRUYEN", "Cứu Truyện", "vi")
 internal class CuuTruyenParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.CUUTRUYEN, 24) {
 
-    private val apiSuffix = "/api/v2"
-	override val userAgentKey = ConfigKey.UserAgent(UserAgents.KOTATSU)
+	override val configKeyDomain = ConfigKey.Domain("cuutruyen.net")
 
-	override val configKeyDomain = ConfigKey.Domain(
-		"cuutruyen.net",
-		"nettrom.com",
-		"hetcuutruyen.net",
-		"nettrom.com",
-		"cuutruyen5c844.site",
+	override val availableSortOrders: Set<SortOrder> = EnumSet.of(SortOrder.UPDATED, SortOrder.POPULARITY)
+
+	override val filterCapabilities = MangaListFilterCapabilities(
+		isSearchSupported = true,
+		isSearchWithFiltersSupported = true,
+		isMultipleTagsSupported = true,
 	)
 
-    private val preferredServerKey = ConfigKey.PreferredImageServer(
-        presetValues = mapOf(
-            DESKTOP_COVER to "Ảnh bìa chất lượng cao (Desktop)",
-            MOBILE_COVER to "Ảnh bìa chất lượng thấp (Mobile)",
-        ),
-        defaultValue = DESKTOP_COVER,
-    )
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.add("Cuutruyen-Client", "OfficialWebApp-20250805")
+		.add("Referer", "https://$domain/")
+		.build()
 
-	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
-		super.onCreateConfig(keys)
-        keys.add(preferredServerKey)
-		keys.remove(userAgentKey)
+	private val availableTags = suspendLazy(soft = true) {
+		val data = webClient.httpGet(api("tags/popular"), getRequestHeaders()).parseJson().getJSONObject("data")
+		listOf("common_tags", "warning_tags", "normal_tags").flatMap { group ->
+			data.getJSONArray(group).mapJSON { it.toTag() }
+		}.toSet()
 	}
 
-	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
-		SortOrder.UPDATED,
-		SortOrder.POPULARITY,
-		SortOrder.NEWEST,
-		SortOrder.POPULARITY_WEEK,
-		SortOrder.POPULARITY_MONTH,
-	)
-
-	override val filterCapabilities: MangaListFilterCapabilities
-		get() = MangaListFilterCapabilities(
-			isSearchSupported = true,
-            isSearchWithFiltersSupported = true,
-            isMultipleTagsSupported = true,
-		)
-
-	override suspend fun getFilterOptions(): MangaListFilterOptions {
-		return MangaListFilterOptions(
-			availableTags = availableTags(),
-			availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED),
-		)
-	}
+	override suspend fun getFilterOptions() = MangaListFilterOptions(availableTags = availableTags.get())
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-        val url = buildString {
-            if (!filter.query.isNullOrEmpty() || filter.tags.isNotEmpty() || filter.states.isNotEmpty()) {
-                append("/mangas/search?q=")
-                if (!filter.query.isNullOrEmpty()) {
-                    append(filter.query.urlEncoded())
-                }
-
-                // Bug from API: Select both ONGOING + FINISHED will return empty list for all case
-                val state = listOf(MangaState.ONGOING, MangaState.FINISHED)
-                if (filter.states.containsAll(state)) {
-                    // oneOrThrowIfMany
-                    throw IllegalArgumentException(
-                        ErrorMessages.FILTER_MULTIPLE_STATES_NOT_SUPPORTED
-                    )
-                }
-
-                append("&tags=")
-                val tags = buildList {
-                    addAll(filter.tags.map { "\"${space2plus(it.title.lowercase())}\"" })
-                    addAll(
-                        filter.states.map {
-                            when (it) {
-                                MangaState.ONGOING -> "\"đang+tiến+hành\""
-                                MangaState.FINISHED -> "\"đã+hoàn+thành\""
-                                else -> ""
-                            }
-                        }
-                    )
-                }.filter { it.isNotEmpty() }
-                append(tags.joinToString(separator = "+AND+"))
-
-                append("&page=")
-                append(page.toString())
-            } else {
-                append("/mangas")
-                when (order) {
-                    SortOrder.UPDATED -> append("/recently_updated")
-                    SortOrder.POPULARITY -> append("/top?duration=all")
-                    SortOrder.POPULARITY_WEEK -> append("/top?duration=week")
-                    SortOrder.POPULARITY_MONTH -> append("/top?duration=month")
-                    SortOrder.NEWEST -> {
-                        // clear old buildString
-                        clear()
-                        append("/home_a")
-                    }
-                    else -> append("/recently_updated")
-                }
-
-                when (order) {
-                    SortOrder.POPULARITY, SortOrder.POPULARITY_WEEK, SortOrder.POPULARITY_MONTH -> {
-                        append("&page=")
-                        append(page.toString())
-                    }
-                    else -> {
-                        append("?page=")
-                        append(page.toString())
-                    }
-                }
-            }
-
-            append("&per_page=")
-            append(pageSize)
-        }
-
-        // prevent throw e in app
-        val json = runCatching {
-            webClient.httpGet("https://$domain$apiSuffix$url").parseJson()
-        }.getOrNull() ?: return emptyList()
-
-        val data = json.optJSONArray("data")
-            ?: json.getJSONObject("data").getJSONArray("new_chapter_mangas")
-            ?: json.getJSONObject("data").getJSONArray("mangas")
-
-		return data.mapJSON { jo ->
-			val author = jo.getStringOrNull("author_name")
-            val server = config[preferredServerKey] ?: DESKTOP_COVER
-			Manga(
-				id = generateUid(jo.getLong("id")),
-				url = "$apiSuffix/mangas/${jo.getLong("id")}",
-				publicUrl = "https://truycapcuutruyen.pages.dev/mangas/${jo.getLong("id")}",
-				title = jo.getString("name"),
-				altTitles = emptySet(),
-				coverUrl = if (server == MOBILE_COVER) jo.getString(MOBILE_COVER)
-                    else jo.getString(DESKTOP_COVER),
-				largeCoverUrl = jo.getString(DESKTOP_COVER),
-				authors = setOfNotNull(author),
-				tags = emptySet(),
-				state = null,
-				description = null,
-				contentRating = if (isNsfwSource) ContentRating.ADULT else null,
-				source = source,
-				rating = RATING_UNKNOWN,
-			)
+		val searching = !filter.query.isNullOrBlank() || filter.tags.isNotEmpty()
+		val endpoint = when {
+			searching -> "mangas/search"
+			order == SortOrder.POPULARITY -> "mangas/top"
+			else -> "mangas/recently_updated"
 		}
+		val url = api(endpoint).toHttpUrl().newBuilder()
+			.addQueryParameter("page", page.toString())
+			.addQueryParameter("per_page", "24")
+			.apply {
+				if (searching) {
+					addQueryParameter("q", filter.query.orEmpty().trim())
+					addQueryParameter("tags", filter.tags.joinToString(" AND ") { "\"${it.key}\"" })
+				} else if (order == SortOrder.POPULARITY) {
+					addQueryParameter("duration", "all")
+				}
+			}.build()
+		return webClient.httpGet(url, getRequestHeaders()).parseJson().getJSONArray("data").mapJSON { it.toManga() }
 	}
 
-	override suspend fun getDetails(manga: Manga): Manga = coroutineScope {
-		val url = "https://" + domain + manga.url
-		val chapters = async {
-			webClient.httpGet("$url/chapters").parseJson().getJSONArray("data")
-		}
-		val json = webClient.httpGet(url).parseJson().getJSONObject("data")
-		val chapterDateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.ROOT).apply {
-			timeZone = TimeZone.getTimeZone("GMT+7")
-		}
-		val tags = json.optJSONArray("tags")?.mapJSONToSet { jo ->
-			MangaTag(
-				title = jo.getString("name").toTitleCase(sourceLocale),
-				key = jo.getString("slug"),
-				source = source,
-			)
-		}.orEmpty()
-
-		val state = when {
-			tags.any { it.key == "da-hoan-thanh" } -> MangaState.FINISHED
-			else -> MangaState.ONGOING // Mostly ONGOING but not marked by site owner
-		}
-
-		val newTags = tags.filter { it.key != "da-hoan-thanh" && it.key != "dang-tien-hanh" }.toSet()
-		val author = json.optJSONObject("author")?.getStringOrNull("name")?.substringBefore(',')?.nullIfEmpty()
-		val title = json.getStringOrNull("name") ?: manga.title
-		val team = json.optJSONObject("team")?.getStringOrNull("name")
-
-		manga.copy(
-			title = title,
-			altTitles = json.optJSONArray("titles")?.mapJSONToSet { it.getString("name") }?.minus(title).orEmpty(),
-			contentRating = if (json.getBooleanOrDefault("is_nsfw", false)) {
-				ContentRating.ADULT
-			} else {
-				ContentRating.SAFE
-			},
-			authors = setOfNotNull(author),
-			description = json.getStringOrNull("full_description"),
-			tags = newTags,
-			state = state,
-			chapters = chapters.await().mapChapters(reversed = true) { _, jo ->
-				val chapterId = jo.getLong("id")
-				val number = jo.getFloatOrDefault("number", 0f)
+	override suspend fun getDetails(manga: Manga): Manga {
+		val path = resolveMangaPath(manga)
+		val data = webClient.httpGet(path.toAbsoluteUrl(domain), getRequestHeaders()).parseJson().getJSONObject("data")
+		val tags = data.getJSONArray("tags").mapJSON { it.toTag() }.toSet()
+		val scanlator = data.optJSONObject("team")?.getStringOrNull("name")
+		val chapters = webClient.httpGet("${path.toAbsoluteUrl(domain)}/chapters", getRequestHeaders()).parseJson()
+			.getJSONArray("data").mapJSON { it }.sortedBy { it.getInt("order") }.map { chapter ->
+				val chapterId = chapter.getLong("id")
+				val chapterPath = "/api/v2/chapters/$chapterId"
+				val number = chapter.getStringOrNull("number")
 				MangaChapter(
+					// Numeric ids, as the original API parser made them, keep saved history valid.
 					id = generateUid(chapterId),
-					title = jo.getStringOrNull("name"),
-					number = number,
+					url = chapterPath,
+					title = listOfNotNull(
+						number?.takeIf { it.toFloatOrNull() == null },
+						chapter.getStringOrNull("name"),
+					).joinToString(" - ").ifEmpty { null },
+					number = number?.toFloatOrNull() ?: 0f,
 					volume = 0,
-					url = "$apiSuffix/chapters/$chapterId",
-					scanlator = team,
-					uploadDate = chapterDateFormat.parseSafe(jo.getStringOrNull("created_at")),
+					uploadDate = chapter.getStringOrNull("created_at")?.let {
+						OffsetDateTime.parse(it).toInstant().toEpochMilli()
+					} ?: 0L,
+					scanlator = scanlator,
 					branch = null,
 					source = source,
 				)
+			}
+		return manga.copy(
+			title = data.getString("name"),
+			publicUrl = "/mangas/${data.getLong("id")}".toAbsoluteUrl(domain),
+			coverUrl = (data.getStringOrNull("cover_mobile_url") ?: data.getStringOrNull("cover_url"))?.storageUrl(),
+			largeCoverUrl = data.getStringOrNull("cover_url")?.storageUrl(),
+			altTitles = data.getJSONArray("titles").mapJSON { it.getString("name") }
+				.filterNot { it == data.getString("name") }.toSet(),
+			authors = setOfNotNull(data.optJSONObject("author")?.getStringOrNull("name")),
+			description = data.getStringOrNull("full_description") ?: data.getStringOrNull("description"),
+			tags = tags,
+			state = when {
+				tags.any { it.key == "đã hoàn thành" } -> MangaState.FINISHED
+				tags.any { it.key == "tạm ngưng" } -> MangaState.PAUSED
+				tags.any { it.key == "đang tiến hành" } -> MangaState.ONGOING
+				else -> null
 			},
+			contentRating = if (data.optBoolean("is_nsfw")) ContentRating.ADULT else null,
+			chapters = chapters,
 		)
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val url = "https://$domain${chapter.url}"
-		val json = webClient.httpGet(url).parseJson().getJSONObject("data")
-
-		return json.getJSONArray("pages").mapJSON { jo ->
-			val imageUrl = jo.getString("image_url").toHttpUrl().newBuilder()
-			val id = jo.getLong("id")
-			val drm = jo.getStringOrNull("drm_data")
-			if (!drm.isNullOrEmpty()) {
-				imageUrl.fragment(DRM_DATA_KEY + drm)
+		val path = chapter.url.toApiPath("chapters")
+		val data = webClient.httpGet(path.toAbsoluteUrl(domain), getRequestHeaders()).parseJson().getJSONObject("data")
+		val pages = data.getJSONArray("pages").mapJSON { it }.sortedBy { it.getInt("order") }
+		if (pages.isEmpty()) throw ParseException("Chapter has no readable pages", chapter.url)
+		return pages.map { page ->
+			val image = page.getString("image_url").storageUrl().toHttpUrl().newBuilder()
+			page.getStringOrNull("drm_data")?.takeIf { it.isNotBlank() }?.let {
+				// Persist the map with the page URL, without sending it to the image server.
+				image.fragment("cuutruyen=" + CuuTruyenDrm.decode(context.decodeBase64(it.filterNot(Char::isWhitespace))).joinToString("|") { strip ->
+					"${strip.first}-${strip.second}"
+				})
 			}
 			MangaPage(
-				id = generateUid(id),
-				url = imageUrl.build().toString(),
+				id = generateUid(page.getLong("id")),
+				url = image.build().toString(),
 				preview = null,
 				source = source,
 			)
@@ -247,197 +144,86 @@ internal class CuuTruyenParser(context: MangaLoaderContext) :
 	}
 
 	override fun intercept(chain: Interceptor.Chain): Response {
-		val response = chain.proceed(chain.request())
-		val fragment = response.request.url.fragment
-
-		if (fragment == null || !fragment.contains(DRM_DATA_KEY)) {
-			return response
-		}
-
+		val original = chain.request()
+		val request = STORAGE_HOSTS[original.url.host]?.let { host ->
+			original.newBuilder().url(original.url.newBuilder().host(host).build()).build()
+		} ?: original
+		val response = chain.proceed(request)
+		val map = request.url.fragment?.takeIf { it.startsWith("cuutruyen=") } ?: return response
+		if (!response.isSuccessful) return response
 		return context.redrawImageResponse(response) { bitmap ->
-			val drmData = fragment.substringAfter(DRM_DATA_KEY)
-			unscrambleImage(bitmap, drmData)
+			CuuTruyenDrm.redraw(bitmap, CuuTruyenDrm.parse(map.removePrefix("cuutruyen=")), context::createBitmap)
 		}
 	}
 
-	private fun unscrambleImage(bitmap: Bitmap, drmData: String): Bitmap {
-		val data = context.decodeBase64(drmData)
-			.decodeXorCipher(DECRYPTION_KEY)
-			.toString(Charsets.UTF_8)
+	override suspend fun getRelatedManga(seed: Manga): List<Manga> =
+		webClient.httpGet("${resolveMangaPath(seed).toAbsoluteUrl(domain)}/similar", getRequestHeaders()).parseJson()
+			.getJSONArray("data").mapJSON { it.toManga() }
 
-		if (!data.startsWith("#v4|")) {
-			throw IOException("Invalid DRM data (does not start with expected magic bytes): $data")
-		}
-
-		val result = context.createBitmap(bitmap.width, bitmap.height)
-		var sy = 0
-		for (t in data.split('|').drop(1)) {
-			val (dy, height) = t.split('-').map(String::toInt)
-			val srcRect = Rect(0, sy, bitmap.width, sy + height)
-			val dstRect = Rect(0, dy, bitmap.width, dy + height)
-
-			result.drawBitmap(bitmap, srcRect, dstRect)
-			sy += height
-		}
-
-		return result
+	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
+		if (link.host != domain) return null
+		val match = MANGA_PATH.matchEntire(link.encodedPath.trimEnd('/')) ?: return null
+		return getDetails(JSONObject().put("id", match.groupValues[1].toLong()).put("name", "").toManga())
 	}
 
-	private fun ByteArray.decodeXorCipher(key: String): ByteArray {
-		val k = key.toByteArray(Charsets.UTF_8)
-
-		return this.mapIndexed { i, b ->
-			(b.toInt() xor k[i % k.size].toInt()).toByte()
-		}.toByteArray()
-	}
-
-    private fun space2plus(input: String): String = input.replace(' ', '+')
-
-    // keep old tags list, key in MangaTag is unnecessary
-	private fun availableTags() = arraySetOf( // big thanks to beer-psi
-		MangaTag("School life", "school-life", source),
-		MangaTag("Nsfw", "nsfw", source),
-		MangaTag("Monster girls", "monster-girls", source),
-		MangaTag("Magic", "magic", source),
-		MangaTag("tình yêu không được đáp lại", "tinh-yeu-khong-duoc-dap-lai", source),
-        MangaTag("tình yêu thuần khiết", "tinh-yeu-thuan-khiet", source),
-		MangaTag("Khỏa thân", "khoa-than", source),
-		MangaTag("Gyaru", "gyaru", source),
-		MangaTag("4-Koma", "4-koma", source),
-		MangaTag("Manga", "manga", source),
-		MangaTag("Thể thao", "the-thao", source),
-		MangaTag("Hài hước", "hai-huoc", source),
-		MangaTag("Shounen", "shounen", source),
-		MangaTag("Học đường", "hoc-duong", source),
-		MangaTag("Chất lượng cao", "chat-luong-cao", source),
-		MangaTag("Comedy", "comedy", source),
-		MangaTag("Action", "action", source),
-		MangaTag("Horror", "horror", source),
-		MangaTag("Sci-fi", "sci-fi", source),
-		MangaTag("Aliens", "aliens", source),
-		MangaTag("Martial Arts", "martial-arts", source),
-		MangaTag("Military", "military", source),
-		MangaTag("Monsters", "monsters", source),
-		MangaTag("Supernatural", "supernatural", source),
-		MangaTag("Web Comic", "web-comic", source),
-		MangaTag("Phiêu lưu", "phieu-luu", source),
-		MangaTag("Hậu tận thế", "hau-tan-the", source),
-		MangaTag("Hành động", "hanh-dong", source),
-		MangaTag("Sinh tồn", "sinh-ton", source),
-		MangaTag("Du hành thời gian", "du-hanh-thoi-gian", source),
-		MangaTag("Khoa học", "khoa-hoc", source),
-		MangaTag("Tạm ngưng", "tam-ngung", source),
-		MangaTag("NSFW", "nsfw", source),
-		MangaTag("Bạo lực", "bao-luc", source),
-		MangaTag("Khoả thân", "khoa-than", source),
-		MangaTag("Bí ẩn", "bi-an", source),
-		MangaTag("Trinh thám", "trinh-tham", source),
-		MangaTag("Kinh dị", "kinh-di", source),
-		MangaTag("Máu me", "mau-me", source),
-		MangaTag("Tình dục", "tinh-duc", source),
-		MangaTag("Có màu", "co-mau", source),
-		MangaTag("Manhwa", "manhwa", source),
-		MangaTag("Webtoon", "webtoon", source),
-		MangaTag("Siêu nhiên", "sieu-nhien", source),
-		MangaTag("Fantasy", "fantasy", source),
-		MangaTag("Võ thuật", "vo-thuat", source),
-		MangaTag("Drama", "drama", source),
-		MangaTag("Hệ thống", "he-thong", source),
-		MangaTag("Lãng mạn", "lang-man", source),
-		MangaTag("Đời thường", "doi-thuong", source),
-		MangaTag("Công sở", "cong-so", source),
-		MangaTag("Sát thủ", "sat-thu", source),
-		MangaTag("Phép thuật", "phep-thuat", source),
-		MangaTag("Tội phạm", "toi-pham", source),
-		MangaTag("Seinen", "seinen", source),
-		MangaTag("Isekai", "isekai", source),
-		MangaTag("Chuyển sinh", "chuyen-sinh", source),
-		MangaTag("Harem", "harem", source),
-		MangaTag("Mecha", "mecha", source),
-		MangaTag("Trung cổ", "trung-co", source),
-		MangaTag("LGBT", "lgbt", source),
-		MangaTag("Yaoi", "yaoi", source),
-		MangaTag("Game", "game", source),
-		MangaTag("Bi kịch", "bi-kich", source),
-		MangaTag("Động vật", "dong-vat", source),
-		MangaTag("Tâm lý", "tam-ly", source),
-		MangaTag("Manhua", "manhua", source),
-		MangaTag("Nam biến nữ", "nam-bien-nu", source),
-		MangaTag("Romcom", "romcom", source),
-		MangaTag("Award Winning", "award-winning", source),
-		MangaTag("Oneshot", "oneshot", source),
-		MangaTag("Khoa học viễn tưởng", "khoa-hoc-vien-tuong", source),
-		MangaTag("Dark Fantasy", "dark-fantasy", source),
-		MangaTag("Zombie", "zombie", source),
-		MangaTag("Nam x Nam", "nam-x-nam", source),
-		MangaTag("Giật gân", "giat-gan", source),
-		MangaTag("Cảnh sát", "canh-sat", source),
-		MangaTag("NTR", "ntr", source),
-		MangaTag("Cooking", "cooking", source),
-		MangaTag("Ẩm thực", "am-thuc", source),
-		MangaTag("Ecchi", "ecchi", source),
-		MangaTag("Quái vật", "quai-vat", source),
-		MangaTag("Vampires", "vampires", source),
-		MangaTag("Nam giả nữ", "nam-gia-nu", source),
-		MangaTag("Yakuza", "yakuza", source),
-		MangaTag("Romance", "romance", source),
-		MangaTag("Sport", "sport", source),
-		MangaTag("Shoujo", "shoujo", source),
-		MangaTag("Ninja", "ninja", source),
-		MangaTag("Lịch sử", "lich-su", source),
-		MangaTag("Doujinshi", "doujinshi", source),
-		MangaTag("Databook", "databook", source),
-		MangaTag("Adventure", "adventure", source),
-		MangaTag("Y học", "y-hoc", source),
-		MangaTag("Miễn bản quyền", "mien-ban-quyen", source),
-		MangaTag("Josei", "josei", source),
-		MangaTag("Psychological", "psychological", source),
-		MangaTag("Anime", "anime", source),
-		MangaTag("Yuri", "yuri", source),
-		MangaTag("Yonkoma", "yonkoma", source),
-		MangaTag("Quân đội", "quan-doi", source),
-		MangaTag("Nữ giả nam", "nu-gia-nam", source),
-		MangaTag("Chính trị", "chinh-tri", source),
-		MangaTag("Tuyển tập", "tuyen-tap", source),
-		MangaTag("Tu tiên", "tu-tien", source),
-		MangaTag("Vô CP", "vo-cp", source),
-		MangaTag("Xuyên không", "xuyen-khong", source),
-		MangaTag("Việt Nam", "viet-nam", source),
-		MangaTag("Việt nam", "viet-nam", source),
-		MangaTag("Toán học", "toan-hoc", source),
-		MangaTag("Thiếu niên", "thieu-nien", source),
-		MangaTag("Tình yêu", "tinh-yeu", source),
-		MangaTag("Chính kịch", "chinh-kich", source),
-		MangaTag("Ngọt ngào", "ngot-ngao", source),
-		MangaTag("Wholesome", "wholesome", source),
-		MangaTag("Smut", "smut", source),
-		MangaTag("Gore", "gore", source),
-		MangaTag("School Life", "school-life", source),
-		MangaTag("Slice of Life", "slice-of-life", source),
-		MangaTag("Tragedy", "tragedy", source),
-		MangaTag("Mystery", "mystery", source),
-		MangaTag("Atlus", "atlus", source),
-		MangaTag("Sega", "sega", source),
-		MangaTag("RPG", "rpg", source),
-		MangaTag("Chuyển thể", "chuyen-the", source),
-		MangaTag("Historical", "historical", source),
-		MangaTag("Medical", "medical", source),
-		MangaTag("Ghosts", "ghosts", source),
-		MangaTag("Thriller", "thriller", source),
-		MangaTag("Animals", "animals", source),
-		MangaTag("Survival", "survival", source),
-		MangaTag("Samurai", "samurai", source),
-		MangaTag("Virtual Reality", "virtual-reality", source),
-		MangaTag("Video Games", "video-games", source),
-		MangaTag("Monster Girls", "monster-girls", source),
-		MangaTag("Adaption", "adaption", source),
-		MangaTag("Idol", "idol", source),
+	private fun JSONObject.toTag() = MangaTag(
+		key = getString("name"),
+		title = getString("name").toTitleCase(sourceLocale),
+		source = source,
 	)
 
+	private fun JSONObject.toManga(): Manga {
+		val mangaId = getLong("id")
+		val path = "/api/v2/mangas/$mangaId"
+		return Manga(
+			// Numeric ids, as the original API parser made them, keep saved favourites valid.
+			id = generateUid(mangaId),
+			url = path,
+			publicUrl = "/mangas/${getLong("id")}".toAbsoluteUrl(domain),
+			title = getString("name"),
+			altTitles = emptySet(),
+			coverUrl = (getStringOrNull("cover_mobile_url") ?: getStringOrNull("cover_url"))?.storageUrl(),
+			largeCoverUrl = getStringOrNull("cover_url")?.storageUrl(),
+			authors = setOfNotNull(getStringOrNull("author_name")),
+			tags = emptySet(),
+			state = null,
+			description = null,
+			contentRating = null,
+			source = source,
+			rating = RATING_UNKNOWN,
+		)
+	}
+
+	private suspend fun resolveMangaPath(manga: Manga): String {
+		if (!manga.url.startsWith("/truyen/")) return manga.url.toApiPath("mangas")
+		// Entries from the unrelated .moe catalogue have no shared IDs. Only migrate an unambiguous exact title.
+		val matches = getListPage(1, SortOrder.UPDATED, MangaListFilter(query = manga.title))
+			.filter { it.title.trim().equals(manga.title.trim(), ignoreCase = true) }
+		return matches.singleOrNull()?.url
+			?: throw ParseException("Cannot uniquely match saved manga on CuuTruyen.net", manga.publicUrl)
+	}
+
+	private fun String.toApiPath(resource: String): String {
+		val path = if (startsWith("http")) toHttpUrl().encodedPath else this
+		val id = path.trimEnd('/').substringAfterLast('/').toLongOrNull()
+			?: throw ParseException("Invalid CuuTruyen $resource URL", this)
+		return "/api/v2/$resource/$id"
+	}
+
+	private fun api(path: String) = "https://$domain/api/v2/$path"
+
+	private fun String.storageUrl(): String {
+		val url = toHttpUrl()
+		val host = STORAGE_HOSTS[url.host] ?: return this
+		return url.newBuilder().host(host).build().toString()
+	}
+
 	private companion object {
-		const val DRM_DATA_KEY = "drm_data="
-		const val DECRYPTION_KEY = "3141592653589793"
-        const val MOBILE_COVER = "cover_mobile_url"
-        const val DESKTOP_COVER = "cover_url"
+		// The official client rewrites these retired API storage hosts before loading images.
+		val STORAGE_HOSTS = mapOf(
+			"storage-ct.lrclib.net" to "storage-bravo.cuutruyen.net",
+			"storage-ct-riften.site" to "storage-charlie.cuutruyen.net",
+		)
+		val MANGA_PATH = Regex("/(?:api/v2/)?mangas/(\\d+)(?:/chapters/\\d+)?")
 	}
 }

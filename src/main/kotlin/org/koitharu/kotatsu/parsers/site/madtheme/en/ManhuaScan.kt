@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.madtheme.en
 
 import org.jsoup.nodes.Document
+import org.koitharu.kotatsu.parsers.Broken
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.ContentRating
@@ -30,6 +31,7 @@ import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 
+@Broken("Original site closed, all domains gone")
 @MangaSourceParser("MANHUASCAN", "kaliscan.io", "en")
 internal class ManhuaScan(context: MangaLoaderContext) :
 	MadthemeParser(context, MangaParserSource.MANHUASCAN, "kaliscan.io") {

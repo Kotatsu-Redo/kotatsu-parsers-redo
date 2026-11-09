@@ -7,7 +7,9 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-private const val HASH_CIPHER = "AES/CBC/PKCS7PADDING"
+// PKCS5Padding is the standard JCA name; it pads AES blocks exactly like PKCS7 and,
+// unlike "PKCS7PADDING" (an Android/BouncyCastle alias), it also exists on desktop JVMs
+private const val HASH_CIPHER = "AES/CBC/PKCS5Padding"
 private const val AES = "AES"
 private const val KDF_DIGEST = "MD5"
 

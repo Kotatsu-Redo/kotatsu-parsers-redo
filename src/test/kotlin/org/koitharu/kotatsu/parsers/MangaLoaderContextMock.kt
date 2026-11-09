@@ -44,6 +44,9 @@ internal object MangaLoaderContextMock : MangaLoaderContext() {
 	override suspend fun evaluateJs(script: String): String? = evaluateJs("", script, 10000L)
 
 	override suspend fun evaluateJs(baseUrl: String, script: String, timeout: Long): String? {
+		if (EmulatorWebView.isEnabled && baseUrl.isNotEmpty()) {
+			return EmulatorWebView.evaluate(baseUrl, script, timeout)
+		}
 		return QuackContext.create().use {
 			it.evaluate(script)?.toString()
 		}

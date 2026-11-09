@@ -47,6 +47,10 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 	override val configKeyDomain = ConfigKey.Domain("verdinha.wtf", "empreguetes.xyz")
 	private val apiUrl = "https://api.verdinha.wtf"
 	private val cdnUrl = "https://cdn.verdinha.wtf"
+
+	// Maid Scan's own scan id. The catalog it lists also carries works owned by
+	// Verdinha (`scan_id` 1), whose covers and pages live under that scan's
+	// folder on the CDN, so paths are built from each work's own `scan_id`.
 	private val scanId = 3
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -55,6 +59,9 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 		SortOrder.POPULARITY_TODAY,
 		SortOrder.POPULARITY_WEEK,
 		SortOrder.POPULARITY_MONTH,
+		SortOrder.RATING,
+		SortOrder.NEWEST,
+		SortOrder.ALPHABETICAL,
 	)
 
 	override val filterCapabilities: MangaListFilterCapabilities
@@ -94,7 +101,23 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val url = buildSearchUrl(page, filter, order)
+		// Views over a period only come from the ranking endpoint, which ignores
+		// the query and filters; with those set, fall back to all-time views.
+		val rankingType = when (order) {
+			SortOrder.POPULARITY_TODAY -> "visualizacoes_hoje"
+			SortOrder.POPULARITY_WEEK -> "visualizacoes_semana"
+			SortOrder.POPULARITY_MONTH -> "visualizacoes_mes"
+			else -> null
+		}
+		val url = if (rankingType != null && filter.isEmpty()) {
+			"$apiUrl/obras/ranking".toHttpUrl().newBuilder()
+				.addQueryParameter("tipo", rankingType)
+				.addQueryParameter("pagina", page.toString())
+				.addQueryParameter("limite", pageSize.toString())
+				.build()
+		} else {
+			buildSearchUrl(page, filter, order)
+		}
 
 		val response = webClient.httpGet(url, apiHeaders).parseJson()
 		val results = response.optJSONArray("obras") ?: return emptyList()
@@ -112,21 +135,18 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			builder.addQueryParameter("obr_nome", filter.query)
 		}
 
-		// Add sorting
-		when (order) {
-			SortOrder.UPDATED -> {
-				builder.addQueryParameter("orderBy", "ultima_atualizacao")
-				builder.addQueryParameter("orderDirection", "DESC")
-			}
-			SortOrder.POPULARITY -> {
-				builder.addQueryParameter("orderBy", "media_rating")
-				builder.addQueryParameter("orderDirection", "DESC")
-			}
-			else -> {
-				builder.addQueryParameter("orderBy", "ultima_atualizacao")
-				builder.addQueryParameter("orderDirection", "DESC")
-			}
+		// Add sorting. The API ignores unknown `orderBy` values (the old
+		// "media_rating" silently gave newest first) and then sorts by creation.
+		val (orderBy, direction) = when (order) {
+			SortOrder.POPULARITY, SortOrder.POPULARITY_TODAY,
+			SortOrder.POPULARITY_WEEK, SortOrder.POPULARITY_MONTH -> "visualizacoes_geral" to "DESC"
+			SortOrder.RATING -> "rating" to "DESC"
+			SortOrder.NEWEST -> "criacao" to "DESC"
+			SortOrder.ALPHABETICAL -> "nome" to "ASC"
+			else -> "ultima_atualizacao" to "DESC"
 		}
+		builder.addQueryParameter("orderBy", orderBy)
+		builder.addQueryParameter("orderDirection", direction)
 
 		// Add tags
 		filter.tags.forEach { tag ->
@@ -145,13 +165,14 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			type?.let { builder.addQueryParameter("formt_id", it) }
 		}
 
-		// Add status
+		// Add status: Maid Scan's own status ids, as listed by /obras/filtros
+		// (1-4 are Verdinha's and only match the works borrowed from it).
 		filter.states.firstOrNull()?.let { state ->
 			val statusId = when (state) {
-				MangaState.ONGOING -> "1"
-				MangaState.FINISHED -> "2"
-				MangaState.PAUSED -> "3"
-				MangaState.ABANDONED -> "4"
+				MangaState.ONGOING -> "10"
+				MangaState.FINISHED -> "12"
+				MangaState.PAUSED -> "11"
+				MangaState.ABANDONED -> "13"
 				else -> null
 			}
 			statusId?.let { builder.addQueryParameter("stt_id", it) }
@@ -167,12 +188,19 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			name.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
 		}
 		val coverPath = json.optString("obr_imagem", "").takeIf { it != "null" && it.isNotEmpty() } ?: ""
+		val workScanId = json.optInt("scan_id").takeIf { it > 0 } ?: scanId
 
-		val coverUrl = when {
+		val largeCoverUrl = when {
 			coverPath.isEmpty() -> null
 			coverPath.startsWith("http") -> coverPath
 			coverPath.startsWith("wp-content") -> "$cdnUrl/$coverPath"
-			else -> "$cdnUrl/scans/$scanId/obras/$id/$coverPath"
+			else -> "$cdnUrl/scans/$workScanId/obras/$id/$coverPath"
+		}
+		// The site's lists use the API's resized copy instead of the full-size file.
+		val coverUrl = if (largeCoverUrl != null && largeCoverUrl.startsWith("$cdnUrl/scans/")) {
+			"$apiUrl/cdn/scans/$workScanId/obras/$id/$coverPath?width=300"
+		} else {
+			largeCoverUrl
 		}
 
 		// Get genre information
@@ -197,7 +225,7 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			tags = emptySet(),
 			state = null,
 			authors = emptySet(),
-			largeCoverUrl = null,
+			largeCoverUrl = largeCoverUrl,
 			description = null,
 			chapters = null,
 		)
@@ -232,9 +260,13 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 			)
 		}?.toSet() ?: emptySet()
 
+		// Some works list a number twice (a re-upload, or an uncensored edition
+		// next to the censored one); keep the newest upload of each number.
 		val chapters = mangaJson.optJSONArray("capitulos")?.mapJSON { chapterJson ->
 			parseChapter(chapterJson, obraId)
-		} ?: emptyList()
+		}.orEmpty()
+			.groupBy { it.number }
+			.map { (_, sameNumber) -> sameNumber.maxBy { it.uploadDate } }
 
 		return manga.copy(
 			title = mangaJson.optString("obr_nome", manga.title),
@@ -276,12 +308,20 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val urlParts = chapter.url.substringAfter("/capitulo/").split("/")
 		val chapterId = urlParts[0]
-		val obraId = urlParts.getOrNull(1)?.toIntOrNull() ?: 0
 
 		// Fetch chapter data from API
 		val chapterData = webClient.httpGet("$apiUrl/capitulos/$chapterId", apiHeaders).parseJson()
 
-		val capNumero = chapterData.optInt("cap_numero")
+		// The work may belong to another scan (Verdinha's are under "scans/1"),
+		// so take its ids from the chapter rather than assuming Maid Scan's.
+		val obra = chapterData.optJSONObject("obra")
+		val obraId = obra?.optInt("obr_id")?.takeIf { it > 0 }
+			?: urlParts.getOrNull(1)?.toIntOrNull() ?: 0
+		val workScanId = obra?.optInt("scan_id")?.takeIf { it > 0 } ?: scanId
+		// The CDN folder is the chapter number as written: "58", "0.5".
+		val capNumero = chapterData.optDouble("cap_numero").takeUnless { it.isNaN() }?.let {
+			if (it == it.toLong().toDouble()) it.toLong().toString() else it.toString()
+		}
 
 		// Parse pages from the response
 		val pagesArray = chapterData.optJSONArray("cap_paginas")
@@ -292,20 +332,16 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 
 			if (pageSrc.isEmpty()) return@mapJSONNotNull null
 
-			// Each page carries a ready-made `path` relative to the CDN root
-			// ("scans/3/obras/15083/capitulos/1/33353.png"); only fall back to
-			// rebuilding it from the parts when that is missing.
-			val pagePath = pageJson.optString("path").takeIf { it.isNotEmpty() && it != "null" }
-
+			// The page's `path` is not used: on some works it is the full file path,
+			// on others only the folder, spelled "38_5" where the CDN has "38.5".
 			val imageUrl = when {
 				// Already a full URL
 				pageSrc.startsWith("http") -> pageSrc
-				pagePath != null -> "$cdnUrl/${pagePath.trimStart('/')}"
 				// WordPress manga path, looks like: "manga_.../hash/001.webp"
 				pageSrc.startsWith("manga_") -> "$cdnUrl/wp-content/uploads/WP-manga/data/$pageSrc"
 				// WordPress legacy path: "wp-content/uploads/..."
 				pageSrc.startsWith("wp-content") -> "$cdnUrl/$pageSrc"
-				obraId > 0 && capNumero > 0 -> "$cdnUrl/scans/$scanId/obras/$obraId/capitulos/$capNumero/$pageSrc"
+				obraId > 0 && capNumero != null -> "$cdnUrl/scans/$workScanId/obras/$obraId/capitulos/$capNumero/$pageSrc"
 				else -> "$cdnUrl/$pageSrc"
 			}
 
@@ -319,7 +355,9 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 	}
 
 	private suspend fun fetchAvailableTags(): Set<MangaTag> {
+		// The endpoint pages by 10 by default, which hid most of the tags.
 		val url = "$apiUrl/tags".toHttpUrl().newBuilder()
+			.addQueryParameter("limite", "200")
 			.build()
 
 		val response = webClient.httpGet(url, apiHeaders).parseJson()
@@ -327,7 +365,9 @@ internal class MaidScan(context: MangaLoaderContext) : PagedMangaParser(
 		// the tag filter permanently empty.
 		val tagsArray = response.optJSONArray("tags") ?: return emptySet()
 
-		return tagsArray.mapJSON { tagJson ->
+		return tagsArray.mapJSONNotNull { tagJson ->
+			// Several tags are defined but not used by any work yet.
+			if (tagJson.optInt("total_obras", 1) == 0) return@mapJSONNotNull null
 			val tagName = tagJson.optString("tag_nome").ifEmpty {
 				tagJson.optString("nome", "")
 			}

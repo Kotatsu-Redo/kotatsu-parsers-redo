@@ -4,7 +4,8 @@
       "Bash(curl:*)",
       "WebFetch(domain:klz9.com)",
       "WebSearch",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(python -c ' *)"
     ]
   }
 }

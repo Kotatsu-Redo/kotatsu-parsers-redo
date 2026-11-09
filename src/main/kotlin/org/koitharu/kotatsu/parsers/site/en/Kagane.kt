@@ -1,5 +1,8 @@
 package org.koitharu.kotatsu.parsers.site.all
 
+import kotlinx.coroutines.runBlocking
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -15,6 +18,8 @@ import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
+import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
+import java.io.IOException
 import java.math.BigInteger
 import java.net.URI
 import java.nio.ByteBuffer
@@ -23,6 +28,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -32,18 +38,27 @@ import javax.crypto.spec.SecretKeySpec
 internal class Kagane(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.KAGANE, pageSize = 35) {
 
-    override val configKeyDomain = ConfigKey.Domain("kagane.to")
+    // kagane.to stopped resolving when the site moved on. kagane.org still serves the
+    // API, but the image host answers 404 to its Origin, so kagane.moe is the only usable one.
+    override val configKeyDomain = ConfigKey.Domain("kagane.moe")
 
     // The API used to live on its own `yuzuki.` host; that name no longer
     // resolves at all. It is served from the site domain now, so read it through
-    // [domain] rather than hardcoding a host that can be pulled again.
-    private val apiUrl get() = "https://$domain"
+    // [siteDomain] rather than hardcoding a host that can be pulled again.
+    private val apiUrl get() = "https://$siteDomain"
+
+    // The app keeps a saved domain, and earlier versions used these: kagane.org lists titles, but its images fail.
+    private val siteDomain: String
+        get() = domain.takeUnless { it == "kagane.org" || it == "kagane.to" } ?: configKeyDomain.defaultValue
+
+    override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+        .set("Referer", "https://$siteDomain/")
+        .build()
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
         SortOrder.POPULARITY,
         SortOrder.NEWEST,
-        SortOrder.ALPHABETICAL
     )
 
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
@@ -64,6 +79,11 @@ internal class Kagane(context: MangaLoaderContext) :
     )
 
     private companion object {
+        val TITLE_TAG_REGEX = Regex("""\(([^()]+)\)\s*$""")
+        val LINK_HOSTS = setOf("kagane.moe", "kagane.org", "kagane.cx", "kagane.net")
+        val TOKEN_REJECTED_CODES = setOf(401, 403, 507)
+        const val TOKEN_REFRESH_INTERVAL_MS = 60_000L
+
         val KAGANE_LANGS = arrayOf(
             "en",
             "ja",
@@ -122,8 +142,8 @@ internal class Kagane(context: MangaLoaderContext) :
 
     private suspend fun fetchGenres(): Set<MangaTag> {
         val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
+            .add("Origin", "https://$siteDomain")
+            .add("Referer", "https://$siteDomain/")
             .build()
         return try {
             val raw = webClient.httpGet("$apiUrl/api/v2/genres/list", headers).parseRaw()
@@ -154,8 +174,8 @@ internal class Kagane(context: MangaLoaderContext) :
     private fun parseContentRating(value: String?): ContentRating? {
         return when (value?.lowercase(Locale.ROOT)) {
             "safe" -> ContentRating.SAFE
-            "suggestive" -> ContentRating.SUGGESTIVE
-            "adult", "erotica", "pornographic" -> ContentRating.ADULT
+            "fifteenplus", "suggestive" -> ContentRating.SUGGESTIVE
+            "eighteenplus", "adult", "erotica", "pornographic" -> ContentRating.ADULT
             else -> null
         }
     }
@@ -165,7 +185,6 @@ internal class Kagane(context: MangaLoaderContext) :
             SortOrder.UPDATED -> "updated_at,desc"
             SortOrder.POPULARITY -> "total_views,desc"
             SortOrder.NEWEST -> "created_at,desc"
-            SortOrder.ALPHABETICAL -> "series_name,asc"
             else -> "updated_at,desc"
         }
 
@@ -203,21 +222,18 @@ internal class Kagane(context: MangaLoaderContext) :
                 })
             }
         }
-        jsonBody.put("content_rating", JSONArray().apply {
+        jsonBody.put("age_rating", JSONArray().apply {
             val ratings = filter.contentRating.ifEmpty {
                 EnumSet.of(ContentRating.SAFE, ContentRating.SUGGESTIVE, ContentRating.ADULT)
             }
             if (ContentRating.SAFE in ratings) put("Safe")
-            if (ContentRating.SUGGESTIVE in ratings) put("Suggestive")
-            if (ContentRating.ADULT in ratings) {
-                put("Erotica")
-                put("Pornographic")
-            }
+            if (ContentRating.SUGGESTIVE in ratings) put("FifteenPlus")
+            if (ContentRating.ADULT in ratings) put("EighteenPlus")
         })
 
         val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
+            .add("Origin", "https://$siteDomain")
+            .add("Referer", "https://$siteDomain/")
             .build()
 
         val responseBody = try {
@@ -261,7 +277,7 @@ internal class Kagane(context: MangaLoaderContext) :
             Manga(
                 id = generateUid(id),
                 url = id,
-                publicUrl = "https://$domain/series/$id",
+                publicUrl = "https://$siteDomain/series/$id",
                 coverUrl = coverUrl,
                 title = title,
                 altTitles = emptySet(),
@@ -270,7 +286,7 @@ internal class Kagane(context: MangaLoaderContext) :
                 authors = emptySet(),
                 state = null,
                 source = source,
-                contentRating = parseContentRating(item.optString("content_rating"))
+                contentRating = parseContentRating(item.optString("age_rating"))
             )
         }
     }
@@ -279,8 +295,8 @@ internal class Kagane(context: MangaLoaderContext) :
         val seriesId = manga.url
         val url = "$apiUrl/api/v2/series/$seriesId"
         val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
+            .add("Origin", "https://$siteDomain")
+            .add("Referer", "https://$siteDomain/")
             .build()
         val resp = webClient.httpGet(url, headers)
         val respBody = resp.body?.string() ?: ""
@@ -445,7 +461,17 @@ internal class Kagane(context: MangaLoaderContext) :
                     ),
                 )
             }
-            return chapters.sortedWith(
+            // Some series hold the same chapters from several teams, told apart by a tag at the end of the title
+            val hasRepeats = chapters.groupingBy { it.volume to it.number }.eachCount().values.any { it > 1 }
+            val branched = if (hasRepeats) {
+                chapters.map { chapter ->
+                    val tag = TITLE_TAG_REGEX.find(chapter.title.orEmpty())?.groupValues?.get(1)?.trim()
+                    chapter.copy(branch = tag ?: chapter.scanlator)
+                }
+            } else {
+                chapters
+            }
+            return branched.sortedWith(
                 compareBy<MangaChapter> { it.number <= 0f }
                     .thenBy { it.number }
                     .thenBy { it.volume }
@@ -461,14 +487,7 @@ internal class Kagane(context: MangaLoaderContext) :
                 ?: JSONArray(),
         )
         if (chapters.isEmpty()) {
-            val chaptersUrl = "$apiUrl/api/v2/series/$seriesId/books/list"
-            val chapterResp = webClient.httpGet(chaptersUrl, headers).parseJson()
-            chapters = parseChapters(
-                chapterResp.optJSONArray("series_books")
-                    ?: chapterResp.optJSONArray("seriesBooks")
-                    ?: chapterResp.optJSONArray("content")
-                    ?: JSONArray(),
-            )
+            chapters = parseChapters(fetchSeriesBooks(seriesId, headers))
         }
 
         return manga.copy(
@@ -480,8 +499,40 @@ internal class Kagane(context: MangaLoaderContext) :
             authors = authors,
             tags = genres,
             chapters = chapters,
-            contentRating = parseContentRating(json.optString("content_rating")) ?: manga.contentRating,
+            contentRating = parseContentRating(json.optString("age_rating")) ?: manga.contentRating,
         )
+    }
+
+    // Since the October 2026 site update the series details no longer embed
+    // `series_books`; chapters come from a separate cursor-paginated endpoint.
+    // Results are ascending by default and `before=<next_cursor>` returns the
+    // following page, despite the name.
+    private suspend fun fetchSeriesBooks(seriesId: String, headers: Headers): JSONArray {
+        val books = JSONArray()
+        val seenCursors = HashSet<String>()
+        var cursor: String? = null
+        do {
+            val url = "$apiUrl/api/v2/series/$seriesId/books".toHttpUrl().newBuilder()
+                .addQueryParameter("limit", "500")
+                .apply { cursor?.let { addQueryParameter("before", it) } }
+                .build()
+            val page = webClient.httpGet(url, headers).parseJson()
+            val items = page.optJSONArray("items") ?: break
+            for (i in 0 until items.length()) {
+                books.put(items.get(i))
+            }
+            cursor = page.getStringOrNull("next_cursor")
+        } while (cursor != null && seenCursors.add(cursor))
+        return books
+    }
+
+    // Manga.url is the bare series id, not the "/series/<id>" path of the link.
+    override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
+        if (link.host !in LINK_HOSTS) return null
+        val segments = link.pathSegments
+        if (segments.firstOrNull() != "series") return null
+        val seriesId = segments.getOrNull(1)?.takeIf { UUID_REGEX.matches(it) } ?: return null
+        return resolver.resolveManga(this, url = seriesId)
     }
 
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
@@ -597,8 +648,8 @@ internal class Kagane(context: MangaLoaderContext) :
         certificateFetchAttempted = true
         val url = "$apiUrl/api/v2/static/bin.bin"
         val req = Request.Builder().url(url)
-            .addHeader("Origin", "https://$domain")
-            .addHeader("Referer", "https://$domain/")
+            .addHeader("Origin", "https://$siteDomain")
+            .addHeader("Referer", "https://$siteDomain/")
             .tag(MangaSource::class.java, source)
             .build()
 
@@ -632,12 +683,12 @@ internal class Kagane(context: MangaLoaderContext) :
         }
 
         val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
+            .add("Origin", "https://$siteDomain")
+            .add("Referer", "https://$siteDomain/")
             .build()
 
         val response = webClient.httpPost(
-            urlBuilder().addPathSegments("api/integrity").build(),
+            "$apiUrl/api/integrity".toHttpUrl(),
             JSONObject(),
             headers,
         ).parseJson()
@@ -654,8 +705,8 @@ internal class Kagane(context: MangaLoaderContext) :
     private suspend fun getChallengeResponse(chapterId: String): JSONObject {
         val integrityToken = getIntegrityToken()
         val headers = getRequestHeaders().newBuilder()
-            .add("Origin", "https://$domain")
-            .add("Referer", "https://$domain/")
+            .add("Origin", "https://$siteDomain")
+            .add("Referer", "https://$siteDomain/")
             .add("x-integrity-token", integrityToken)
             .build()
         val challengeUrl = "$apiUrl/api/v2/books/$chapterId?is_datasaver=false"
@@ -725,15 +776,53 @@ internal class Kagane(context: MangaLoaderContext) :
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val host = request.url.host
-        if (host == domain || host.endsWith(".$domain")) {
-            val newRequest = request.newBuilder()
-                .header("Origin", "https://$domain")
-                .header("Referer", "https://$domain/")
-                .build()
+        val url = request.url
+        val host = url.host
+        // Page images live on a separate cache host, which answers 404 without the site's Origin.
+        val isPage = url.queryParameter("token") != null && url.encodedPath.startsWith("/api/v2/books/page/")
+        if (!isPage && host != siteDomain && !host.endsWith(".$siteDomain")) {
+            return chain.proceed(request)
+        }
+        val newRequest = request.newBuilder()
+            .header("Origin", "https://$siteDomain")
+            .header("Referer", "https://$siteDomain/")
+            .build()
+        if (!isPage) {
             return chain.proceed(newRequest)
         }
-        return chain.proceed(request)
+        val chapterId = url.pathSegments[4]
+        val token = pageTokens[chapterId]?.value ?: url.queryParameter("token").orEmpty()
+        val response = chain.proceed(newRequest.withPageToken(token))
+        if (response.code !in TOKEN_REJECTED_CODES) {
+            return response
+        }
+        response.close()
+        return chain.proceed(newRequest.withPageToken(refreshPageToken(chapterId, token)))
+    }
+
+    private fun Request.withPageToken(token: String): Request = newBuilder()
+        .url(url.newBuilder().setQueryParameter("token", token).build())
+        .build()
+
+    // Page tokens are short-lived and valid for one book only, while the page urls live on in the reader.
+    private val pageTokens = ConcurrentHashMap<String, PageToken>()
+
+    private class PageToken(val value: String, val issuedAt: Long)
+
+    @Synchronized
+    private fun refreshPageToken(chapterId: String, rejected: String): String {
+        val known = pageTokens[chapterId]
+        if (known != null && known.value != rejected) return known.value
+        val now = System.currentTimeMillis()
+        if (known != null && now - known.issuedAt < TOKEN_REFRESH_INTERVAL_MS) {
+            throw IOException("Failed to retrieve page token")
+        }
+        pageTokens[chapterId] = PageToken(rejected, now)
+        val token = runCatching {
+            runBlocking { getChallengeResponse(chapterId) }.optString("access_token")
+        }.getOrNull()?.ifBlank { null } ?: throw IOException("Failed to retrieve page token")
+        pageTokens[chapterId] = PageToken(token, now)
+        return token
     }
 
     // Decryption helpers

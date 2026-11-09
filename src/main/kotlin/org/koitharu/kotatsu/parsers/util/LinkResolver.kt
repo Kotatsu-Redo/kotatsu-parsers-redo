@@ -9,33 +9,69 @@ import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.core.AbstractMangaParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
+import java.util.Locale
 
 public class LinkResolver internal constructor(
 	private val context: MangaLoaderContext,
 	public val link: HttpUrl,
 ) {
 
-	private val source = suspendLazy(Dispatchers.Default, ::resolveSource)
+	private val candidates = suspendLazy(Dispatchers.Default, ::resolveCandidates)
 
-	public suspend fun getSource(): MangaParserSource? = source.get()
+	public suspend fun getSource(): MangaParserSource? = candidates.get().firstOrNull()?.source
 
 	public suspend fun getManga(): Manga? {
-		val parser = context.newParserInstance(source.get() ?: return null)
-		return parser.resolveLink(this, link) ?: resolveManga(parser)
+		val ranked = candidates.get()
+		val best = ranked.firstOrNull() ?: return null
+		// Several sources may share a domain (locales of one site, legacy parsers).
+		// Every equally ranked source gets a chance to claim the link before falling back.
+		for (candidate in ranked.takeWhile { it.score == best.score }) {
+			context.newParserInstance(candidate.source).resolveLink(this, link)?.let { return it }
+		}
+		return resolveManga(context.newParserInstance(best.source))
 	}
 
-	private suspend fun resolveSource(): MangaParserSource? = runInterruptible(Dispatchers.Default) {
-		val domains = setOfNotNull(link.host, link.topPrivateDomain())
+	/**
+	 * All sources whose domain matches the link, ranked by:
+	 * 1. exact host match over a match of the top private domain only
+	 * 2. working sources over broken ones
+	 * 3. sources whose locale matches a locale hint of the link (subdomain, first path segment or query)
+	 * 4. declaration order
+	 */
+	private suspend fun resolveCandidates(): List<Candidate> = runInterruptible(Dispatchers.Default) {
+		val host = link.host.removePrefix("www.")
+		val topDomain = link.topPrivateDomain()
+		val localeHints = localeHints()
+		val matches = ArrayList<Candidate>()
 		for (s in MangaParserSource.entries) {
-			val parser = context.newParserInstance(s)
-			for (d in parser.configKeyDomain.presetValues) {
-				if (d in domains) {
-					return@runInterruptible s
-				}
+			val presets = context.newParserInstance(s).configKeyDomain.presetValues
+			var score = when {
+				presets.any { it.removePrefix("www.") == host } -> 4
+				topDomain != null && topDomain in presets -> 0
+				else -> continue
 			}
+			if (!s.isBroken) score += 2
+			if (s.locale.isNotEmpty() && s.locale.lowercase(Locale.ROOT) in localeHints) score += 1
+			matches += Candidate(s, score)
 		}
-		null
+		matches.sortedByDescending { it.score }
 	}
+
+	private fun localeHints(): Set<String> {
+		val raw = ArrayList<String>(6)
+		val labels = link.host.split('.')
+		if (labels.size > 2) raw += labels.first()
+		link.pathSegments.firstOrNull()?.let { raw += it }
+		for (name in LOCALE_QUERY_PARAMS) {
+			link.queryParameter(name)?.let { raw += it }
+		}
+		return raw.mapNotNullTo(HashSet()) { value ->
+			value.substringBefore('-').substringBefore('_').lowercase(Locale.ROOT)
+				.takeIf { it in ISO_LANGUAGES }
+		}
+	}
+
+	private data class Candidate(val source: MangaParserSource, val score: Int)
 
 	internal suspend fun resolveManga(
 		parser: MangaParser,
@@ -120,5 +156,9 @@ public class LinkResolver internal constructor(
 	private companion object {
 
 		const val STUB_TITLE = "Unknown manga"
+
+		val LOCALE_QUERY_PARAMS = arrayOf("lang", "language", "locale", "hl")
+
+		val ISO_LANGUAGES: Set<String> = Locale.getISOLanguages().toHashSet()
 	}
 }

@@ -1,11 +1,16 @@
 package org.koitharu.kotatsu.parsers.site.vi
 
 import androidx.collection.arraySetOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Response
+import org.jsoup.HttpStatusException
+import org.koitharu.kotatsu.parsers.exception.AuthRequiredException
+import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
@@ -13,24 +18,83 @@ import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import org.json.JSONObject
+import java.io.IOException
 import java.util.*
 
 @MangaSourceParser("GOCTRUYENTRANHVUI", "Góc Truyện Tranh Vui", "vi")
 internal class GocTruyenTranhVui(context: MangaLoaderContext):
     PagedMangaParser(context, MangaParserSource.GOCTRUYENTRANHVUI, 50) {
 
-    override val configKeyDomain = ConfigKey.Domain("goctruyentranhvui17.com")
-    private val apiUrl by lazy { "https://$domain/api/v2" }
+    override val configKeyDomain = ConfigKey.Domain("goctruyentranhvui41.com")
+    private val domainResolver by lazy {
+        val probe = GocTruyenDomainProbe(context.httpClient, context.getDefaultUserAgent())
+        GocTruyenDomainResolver({ domain }, probe::isValid, advertisedDomain = probe::advertisedDomain)
+    }
 
     private val requestMutex = Mutex()
     private var lastRequestTime = 0L
 
-    private val apiHeaders by lazy {
-        Headers.Builder()
-            .add("Authorization", TOKEN_KEY)
-            .add("Referer", "https://$domain/")
-            .add("X-Requested-With", "XMLHttpRequest")
-            .build()
+    private fun apiHeaders(siteDomain: String): Headers = Headers.Builder()
+        .add("Referer", "https://$siteDomain/")
+        .add("X-Requested-With", "XMLHttpRequest")
+        .build()
+
+    private suspend fun getApi(url: String, pageUrl: String, siteDomain: String): JSONObject =
+        withSessionRetry(pageUrl, siteDomain) { headers -> webClient.httpGet(url, extraHeaders = headers) }
+
+    private suspend fun withSessionRetry(
+        pageUrl: String,
+        siteDomain: String,
+        request: suspend (Headers) -> Response,
+    ): JSONObject {
+        try {
+            return readApiJson(request(apiHeaders(siteDomain)))
+        } catch (_: AuthRequiredException) {
+            // The web client closes unsuccessful responses before throwing.
+        } catch (e: HttpStatusException) {
+            if (e.statusCode != 403) throw e
+        }
+        return try {
+            readApiJson(request(authenticatedHeaders(pageUrl, siteDomain)))
+        } catch (_: AuthRequiredException) {
+            requestLogin(pageUrl)
+        } catch (e: HttpStatusException) {
+            if (e.statusCode != 403) throw e
+            requestLogin(pageUrl)
+        }
+    }
+
+    private fun readApiJson(response: Response): JSONObject {
+        val json = response.parseJson()
+        if (GocTruyenPageData.requiresAuthorization(json)) throw AuthRequiredException(source)
+        return json
+    }
+
+    private fun requestLogin(pageUrl: String): Nothing {
+        try {
+            context.requestBrowserAction(this, pageUrl)
+        } catch (e: UnsupportedOperationException) {
+            throw AuthRequiredException(source, e)
+        }
+    }
+
+    private suspend fun authenticatedHeaders(pageUrl: String, siteDomain: String): Headers {
+        // Capture the user's actual session; never ship a shared account token or cache it across logouts.
+        val requests = try {
+            context.interceptWebViewRequests(
+                pageUrl,
+                InterceptionConfig(
+                    timeoutMs = 15000L,
+                    urlPattern = Regex("^${Regex.escape("https://$siteDomain/api/")}"),
+                ),
+            )
+        } catch (e: UnsupportedOperationException) {
+            throw AuthRequiredException(source, e)
+        }
+        val authorization = requests.firstNotNullOfOrNull {
+            GocTruyenAuthorization.bearerHeader(it, "https://$siteDomain".toHttpUrl())
+        } ?: throw AuthRequiredException(source)
+        return apiHeaders(siteDomain).newBuilder().add("Authorization", authorization).build()
     }
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -50,10 +114,14 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
         availableStates = EnumSet.of(MangaState.ONGOING, MangaState.FINISHED)
     )
 
-    override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
+    override suspend fun getListPage(
+        page: Int,
+        order: SortOrder,
+        filter: MangaListFilter,
+    ): List<Manga> = domainResolver.withDomain { siteDomain ->
         enforceRateLimit()
         val url = buildString {
-            append(apiUrl)
+            append("https://$siteDomain/api/v2")
             append("/search?p=${page - 1}")
             if (!filter.query.isNullOrBlank()) {
                 append("&searchValue=${filter.query.urlEncoded()}")
@@ -79,11 +147,11 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
             }
         }
 
-        val json = webClient.httpGet(url, extraHeaders = apiHeaders).parseJson()
-        val result = json.optJSONObject("result") ?: return emptyList()
-        val data = result.optJSONArray("data") ?: return emptyList()
+        val json = getApi(url, "https://$siteDomain/", siteDomain)
+        val result = json.optJSONObject("result") ?: return@withDomain emptyList()
+        val data = result.optJSONArray("data") ?: return@withDomain emptyList()
 
-        return List(data.length()) { i ->
+        List(data.length()) { i ->
             val item = data.getJSONObject(i)
             val comicId = item.getString("id")
             val slug = item.getString("nameEn")
@@ -102,10 +170,10 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
                 title = item.getString("name"),
                 altTitles = item.optString("otherName", "").split(",").mapNotNull { it.trim().takeIf(String::isNotBlank) }.toSet(),
                 url = "$comicId:$slug", // Store both id and slug, separated by ':'
-                publicUrl = "https://$domain$mangaUrl",
+                publicUrl = "https://$siteDomain$mangaUrl",
                 rating = item.optDouble("evaluationScore", 0.0).toFloat(),
                 contentRating = null,
-                coverUrl = "https://$domain${item.getString("photo")}",
+                coverUrl = GocTruyenDomainResolver.rebaseUrl(item.getString("photo"), siteDomain),
                 tags = tags,
                 state = when (item.optString("statusCode")) {
                     "PRG" -> MangaState.ONGOING
@@ -118,39 +186,46 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
         }
     }
 
-    override suspend fun getDetails(manga: Manga): Manga {
+    override suspend fun getDetails(manga: Manga): Manga = domainResolver.withDomain { siteDomain ->
         val comicId = manga.url.substringBefore(':')
         val slug = manga.url.substringAfter(':')
+        val publicUrl = "https://$siteDomain/truyen/$slug"
 
         val chapters = try {
             enforceRateLimit()
-            val chapterApiUrl = "https://$domain/api/comic/$comicId/chapter?limit=-1"
-            val chapterJson = webClient.httpGet(chapterApiUrl, extraHeaders = apiHeaders).parseJson()
-            val chaptersData = chapterJson.getJSONObject("result").getJSONArray("chapters")
+            // This public endpoint returns the full list; /chapter requires an account session.
+            val chapterApiUrl = "https://$siteDomain/api/comic/$comicId/chapterNumber"
+            val chapterJson = getApi(chapterApiUrl, publicUrl, siteDomain)
+            val chaptersData = chapterJson.getJSONObject("result").getJSONArray("chapterNumbers")
 
             List(chaptersData.length()) { i ->
-                val item = chaptersData.getJSONObject(i)
-                val number = item.getString("numberChapter")
-                val name = item.getString("name")
+                val number = chaptersData.getString(i)
                 val chapterUrl = "/truyen/$slug/chuong-$number"
                 MangaChapter(
                     id = generateUid(chapterUrl),
-                    title = if (name != "N/A" && name.isNotBlank()) name else "Chapter $number",
+                    title = "Chapter $number",
                     number = number.toFloatOrNull() ?: -1f,
                     volume = 0,
                     url = chapterUrl,
                     scanlator = null,
-                    uploadDate = item.optLong("updateTime", 0L),
+                    uploadDate = 0L,
                     branch = null,
                     source = source
                 )
             }
+        } catch (e: AuthRequiredException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IOException) {
+            if (GocTruyenDomainResolver.isConnectionFailure(e)) throw e
+            emptyList()
         } catch (_: Exception) {
             emptyList()
         }.reversed()
 
         enforceRateLimit()
-        val doc = webClient.httpGet(manga.publicUrl).parseHtml()
+        val doc = webClient.httpGet(publicUrl).parseHtml()
 
         val detailTags = doc.select(".group-content > .v-chip-link").mapNotNullTo(mutableSetOf()) { el ->
             availableTags().find { it.title.equals(el.text(), ignoreCase = true) }?.let {
@@ -158,7 +233,8 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
             }
         }
 
-        return manga.copy(
+        manga.copy(
+            publicUrl = publicUrl,
             title = doc.selectFirst(".v-card-title")?.text().orEmpty(),
             tags = manga.tags + detailTags,
             coverUrl = doc.selectFirst("img.image")?.absUrl("src"),
@@ -173,9 +249,10 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
         )
     }
 
-    override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+    override suspend fun getPages(chapter: MangaChapter): List<MangaPage> = domainResolver.withDomain { siteDomain ->
         enforceRateLimit()
-        val responseBody = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).body.string()
+        val chapterUrl = GocTruyenDomainResolver.rebaseUrl(chapter.url, siteDomain)
+        val responseBody = webClient.httpGet(chapterUrl).body.string()
         val chapterJsonRaw = responseBody.substringAfter("chapterJson: `", "").substringBefore("`", "")
 
         val imageUrls: List<String>
@@ -185,29 +262,36 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
             imageUrls = List(data.length()) { i -> data.getString(i) }
         } else {
             // Fallback: Call the authenticated API
-            val comicId = responseBody.substringAfter("comic = {id:\"", "").substringBefore("\"", "")
+            val comicId = GocTruyenPageData.comicId(responseBody)
+                ?: throw IllegalStateException("Cannot find comic metadata in chapter HTML")
             val chapterNumber = chapter.url.substringAfterLast("chuong-")
             val nameEn = chapter.url.substringAfter("/truyen/").substringBefore("/chuong-")
-
-            if (comicId.isBlank()) {
-                throw Exception("Cannot find comicId in HTML for fallback image request")
-            }
 
             val formBody = mapOf(
                 "comicId" to comicId,
                 "chapterNumber" to chapterNumber,
                 "nameEn" to nameEn
             )
-            val authApiUrl = "$apiUrl/chapter/auth".toHttpUrl()
-            val authResponse = webClient.httpPost(url = authApiUrl, form = formBody, extraHeaders = apiHeaders).parseJson()
+            val authApiUrl = "https://$siteDomain/api/chapter/loadAll".toHttpUrl()
+            val authResponse = withSessionRetry(chapterUrl, siteDomain) { headers ->
+                webClient.httpPost(url = authApiUrl, form = formBody, extraHeaders = headers)
+            }
             val data = authResponse.getJSONObject("result").getJSONArray("data")
             imageUrls = List(data.length()) { i -> data.getString(i) }
         }
 
-        return imageUrls.map { url ->
-            val finalUrl = if (url.startsWith("/image/")) "https://$domain$url" else url
-            MangaPage(id = generateUid(finalUrl), url = finalUrl, preview = null, source = source)
+        imageUrls.map { url ->
+            val finalUrl = GocTruyenDomainResolver.rebaseUrl(url, siteDomain)
+            MangaPage(id = generateUid(finalUrl.toRelativeUrl(siteDomain)), url = finalUrl, preview = null, source = source)
         }
+    }
+
+    override suspend fun getPageUrl(page: MangaPage): String = domainResolver.withDomain { siteDomain ->
+        GocTruyenDomainResolver.rebaseUrl(page.url, siteDomain)
+    }
+
+    override suspend fun getFavicons(): Favicons = domainResolver.withDomain { siteDomain ->
+        FaviconParser(webClient, siteDomain).parseFavicons()
     }
 
     private suspend fun enforceRateLimit() {
@@ -271,6 +355,5 @@ internal class GocTruyenTranhVui(context: MangaLoaderContext):
 
     companion object {
         private const val REQUEST_DELAY_MS = 350L
-        private const val TOKEN_KEY = "Bearer eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJEcmFrZW4iLCJjb21pY0lkcyI6W10sInJvbGVJZCI6bnVsbCwiZ3JvdXBJZCI6bnVsbCwiYWRtaW4iOmZhbHNlLCJyYW5rIjowLCJwZXJtaXNzaW9uIjpbXSwiaWQiOiIwMDAxMTE1OTg2IiwidGVhbSI6ZmFsc2UsImlhdCI6MTc2MDAzMjU0MiwiZW1haWwiOiJudWxsIn0.DxdOvGgPDCRodAWUosS8N1Ti6oKlTRCGQxpNJukqDyBmd2uq61H-oOEqC76wyF1QECmbzGTYbyqIN4CE26JETQ"
     }
 }

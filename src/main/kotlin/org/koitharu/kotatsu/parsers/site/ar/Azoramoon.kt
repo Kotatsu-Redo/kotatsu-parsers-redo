@@ -2,15 +2,14 @@ package org.koitharu.kotatsu.parsers.site.ar
 
 import org.json.JSONArray
 import org.json.JSONObject
-import org.jsoup.nodes.Document
-import org.jsoup.parser.Parser
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
-import org.koitharu.kotatsu.parsers.util.json.toJSONObjectOrNull
+import org.koitharu.kotatsu.parsers.util.json.*
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -114,13 +113,7 @@ internal class Azoramoon(context: MangaLoaderContext) :
 			val coverUrl = obj.optString("featuredImage")
 
 			// Parse status
-			val seriesStatus = obj.optString("seriesStatus", "")
-			val state = when (seriesStatus.uppercase()) {
-				"ONGOING" -> MangaState.ONGOING
-				"COMPLETED" -> MangaState.FINISHED
-				"HIATUS" -> MangaState.PAUSED
-				else -> null
-			}
+			val state = parseState(obj.optString("seriesStatus", ""))
 
 			// Parse genres
 			val genresArray = obj.optJSONArray("genres")
@@ -275,90 +268,62 @@ internal class Azoramoon(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+		val seriesSlug = manga.url.substringAfter("/series/").substringBefore('/')
+		val json = webClient.httpGet("https://api.$domain/api/post?postSlug=${seriesSlug.urlEncoded()}").parseJson()
+		val post = json.getJSONObject("post")
 
-		if (doc.selectFirst("span.inline-block.border.text-foreground")?.text() == "رواية") {
-			return manga.copy(
-				state = MangaState.FINISHED,
-				chapters = emptyList(),
+		val isNovel = post.getBooleanOrDefault("isNovel", false) ||
+			post.getStringOrNull("seriesType").equals("NOVEL", ignoreCase = true)
+
+		val tags = post.optJSONArray("genres")?.mapJSONNotNullToSet { genre ->
+			val name = genre.getStringOrNull("name") ?: return@mapJSONNotNullToSet null
+			MangaTag(
+				key = genre.getStringOrNull("id") ?: return@mapJSONNotNullToSet null,
+				title = name,
+				source = source,
 			)
-		}
+		}.orEmpty()
 
-		val chapters = loadChapters(manga, doc)
-
-		val coverUrl = doc.selectFirst("section img")?.src() ?: manga.coverUrl
-
-		// Extract rating
-		val ratingText = doc.selectFirst("div:contains(التقييم) + div, span:contains(Rating)")?.text()
-		val rating = ratingText?.substringBefore("/")?.trim()?.toFloatOrNull()?.div(5f) ?: RATING_UNKNOWN
-
-		// Extract status
-		val statusText = doc.selectFirst("div:contains(الحالة) + div, span:contains(Status)")?.text()
-		val state = when {
-			statusText?.contains("مستمر", ignoreCase = true) == true ||
-			statusText?.contains("ongoing", ignoreCase = true) == true -> MangaState.ONGOING
-			statusText?.contains("مكتمل", ignoreCase = true) == true ||
-			statusText?.contains("completed", ignoreCase = true) == true -> MangaState.FINISHED
-			else -> null
-		}
-
-		// Extract description from meta tag
-		val description = doc.selectFirst("meta[name=description]")?.attr("content")
-
-		// Extract tags/genres
-		val tags = doc.select("a[href*='/series/?genres='], span.genre").mapNotNullToSet { element ->
-			val genreName = element.text().trim()
-			val genreId = element.attr("href").substringAfter("genres=").substringBefore("&")
-				.ifEmpty { genreName }
-
-			if (genreName.isNotEmpty()) {
-				MangaTag(
-					key = genreId,
-					title = genreName,
-					source = source,
-				)
-			} else {
-				null
-			}
-		}
+		val rating = post.getFloatOrDefault("averageRating", 0f)
+		val chapters = if (isNovel) emptyList() else loadChapters(seriesSlug, post, json.getIntOrDefault("totalChapterCount", 0))
 
 		return manga.copy(
-			coverUrl = coverUrl,
-			rating = rating,
-			state = state,
-			tags = tags,
-			description = description,
+			title = post.getStringOrNull("postTitle") ?: manga.title,
+			altTitles = setOfNotNull(post.getStringOrNull("alternativeTitles")),
+			coverUrl = post.getStringOrNull("featuredImage") ?: manga.coverUrl,
+			rating = if (rating > 0f) (rating / 10f).coerceAtMost(1f) else RATING_UNKNOWN,
+			state = parseState(post.getStringOrNull("seriesStatus")) ?: manga.state,
+			authors = setOfNotNull(post.getStringOrNull("author"), post.getStringOrNull("artist")),
+			tags = tags.ifEmpty { manga.tags },
+			description = post.getStringOrNull("postContent"),
 			chapters = chapters,
 		)
 	}
 
-	private fun loadChapters(manga: Manga, doc: Document): List<MangaChapter> {
-		val seriesSlug = manga.url.substringAfter("/series/", "").substringBefore('/')
-		if (seriesSlug.isEmpty()) return emptyList()
+	private suspend fun loadChapters(seriesSlug: String, post: JSONObject, totalCount: Int): List<MangaChapter> {
+		// The post endpoint may embed a partial (or empty) chapter list; the chapters endpoint returns all of them.
+		val embedded = post.optJSONArray("chapters")
+		val chaptersJson = if (embedded != null && embedded.length() > 0 && embedded.length() >= totalCount) {
+			embedded
+		} else {
+			webClient.httpGet("https://api.$domain/api/chapters?postId=${post.getLong("id")}")
+				.parseJson()
+				.getJSONObject("post")
+				.getJSONArray("chapters")
+		}
 
-		val chaptersJson = extractChaptersFromAstroProps(doc) ?: return emptyList()
-
-		val chapters = ArrayList<MangaChapter>(chaptersJson.length())
-		for (i in 0 until chaptersJson.length()) {
-			val chapter = unboxSerializedValue(chaptersJson.opt(i)) as? JSONObject ?: continue
-			val slug = (unboxSerializedValue(chapter.opt("slug")) as? String)
-				?.takeUnless { it.isBlank() || it == "null" }
-				?: continue
+		// The API lists chapters newest first
+		return chaptersJson.mapChapters(reversed = true) { _, chapter ->
+			if (chapter.isLocked()) return@mapChapters null
+			val slug = chapter.getStringOrNull("slug") ?: return@mapChapters null
 			val url = "/series/$seriesSlug/$slug"
-			val number = when (val rawNumber = unboxSerializedValue(chapter.opt("number"))) {
-				is Number -> rawNumber.toFloat()
-				is String -> rawNumber.toFloatOrNull() ?: 0f
-				else -> 0f
-			}
-			val title = (unboxSerializedValue(chapter.opt("title")) as? String)
-				?.takeUnless { it.isBlank() || it == "null" }
-			val createdAt = unboxSerializedValue(chapter.opt("createdAt")) as? String
-
-			chapters += MangaChapter(
+			val number = chapter.getFloatOrDefault("number", 0f)
+			val title = chapter.getStringOrNull("title")
+			MangaChapter(
 				id = generateUid(url),
 				title = when {
-					!title.isNullOrBlank() && number > 0f -> "الفصل ${formatChapterNumber(number)} - $title"
-					!title.isNullOrBlank() -> title
+					title != null && number > 0f -> "الفصل ${formatChapterNumber(number)} - $title"
+					title != null -> title
 					number > 0f -> "الفصل ${formatChapterNumber(number)}"
 					else -> slug
 				},
@@ -366,39 +331,26 @@ internal class Azoramoon(context: MangaLoaderContext) :
 				volume = 0,
 				url = url,
 				scanlator = null,
-				uploadDate = parseChapterDate(createdAt),
+				uploadDate = parseChapterDate(chapter.getStringOrNull("createdAt")),
 				branch = null,
 				source = source,
 			)
-		}
-		return chapters.sortedBy { it.number }
+		}.sortedBy { it.number }
 	}
 
-	private fun extractChaptersFromAstroProps(doc: Document): JSONArray? {
-		val propsEscaped = doc
-			.selectFirst("section[data-series-tab-panel=chapters] astro-island[props]")
-			?.attr("props")
-			?.takeUnless { it.isBlank() }
-			?: return null
+	// Paid chapters, same rule as the site's Iken theme: they have no images until bought
+	private fun JSONObject.isLocked(): Boolean =
+		getBooleanOrDefault("isLocked", false) ||
+			getBooleanOrDefault("isTimeLocked", false) ||
+			(!getBooleanOrDefault("chapterPurchased", false) && getIntOrDefault("price", 0) != 0)
 
-		val props = Parser.unescapeEntities(propsEscaped, false)
-		val root = props.toJSONObjectOrNull() ?: return null
-		// The chapters island embeds the full chapter list in the "initialChap" prop
-		// (the "post" prop only carries a _count.chapters number, not the array).
-		(unboxSerializedValue(root.opt("initialChap")) as? JSONArray)?.let { return it }
-		// Fallback for older markup that nested chapters inside "post".
-		val post = unboxSerializedValue(root.opt("post")) as? JSONObject ?: return null
-		return unboxSerializedValue(post.opt("chapters")) as? JSONArray
-	}
-
-	private fun unboxSerializedValue(value: Any?): Any? {
-		if (value !is JSONArray || value.length() != 2) {
-			return value
-		}
-		return when (value.opt(0)) {
-			0, 1, "0", "1" -> unboxSerializedValue(value.opt(1))
-			else -> value
-		}
+	private fun parseState(status: String?): MangaState? = when (status?.uppercase()) {
+		"ONGOING", "MASS_RELEASED" -> MangaState.ONGOING
+		"COMPLETED" -> MangaState.FINISHED
+		"HIATUS" -> MangaState.PAUSED
+		"CANCELLED", "DROPPED" -> MangaState.ABANDONED
+		"COMING_SOON" -> MangaState.UPCOMING
+		else -> null
 	}
 
 	private fun formatChapterNumber(number: Float): String {
@@ -419,17 +371,29 @@ internal class Azoramoon(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val fullUrl = chapter.url.toAbsoluteUrl(domain)
-		val doc = webClient.httpGet(fullUrl).parseHtml()
+		val seriesSlug = chapter.url.substringAfter("/series/").substringBefore('/')
+		val chapterSlug = chapter.url.substringAfterLast('/')
+		val url = "https://api.$domain/api/chapter?mangaslug=${seriesSlug.urlEncoded()}&chapterslug=${chapterSlug.urlEncoded()}"
+		val data = webClient.httpGet(url).parseJson().getJSONObject("chapter")
 
-		return doc.select("section[itemprop=articleBody] figure img").mapNotNull { img ->
-			val imageUrl = img.src()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-			MangaPage(
-				id = generateUid(imageUrl),
-				url = imageUrl,
-				preview = null,
-				source = source,
-			)
+		if (data.getBooleanOrDefault("isPermanentlyLocked", false) ||
+			data.getBooleanOrDefault("isLockedByCoins", false) ||
+			data.getBooleanOrDefault("isShortLinkLocked", false)
+		) {
+			throw ParseException("Chapter is locked", chapter.url.toAbsoluteUrl(domain))
 		}
+
+		val images = data.optJSONArray("images") ?: return emptyList()
+		return images.asTypedList<JSONObject>()
+			.sortedBy { it.getIntOrDefault("order", Int.MAX_VALUE) }
+			.mapNotNull { image ->
+				val imageUrl = image.getStringOrNull("url")?.replace(" ", "%20") ?: return@mapNotNull null
+				MangaPage(
+					id = generateUid(imageUrl),
+					url = imageUrl,
+					preview = null,
+					source = source,
+				)
+			}
 	}
 }
