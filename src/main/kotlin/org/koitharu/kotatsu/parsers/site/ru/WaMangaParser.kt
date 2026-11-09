@@ -30,6 +30,8 @@ internal class WaMangaParser(
 
 	private fun apiUrl() = "https://${domain}/api/v1"
 
+	private fun getPublicUrl(jo: JSONObject) = "https://$domain/${jo.getString("type")}/${jo.getString("slug")}"
+
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		val offset = (page - 1) * pageSize
 		val url = buildString {
@@ -48,11 +50,10 @@ internal class WaMangaParser(
 
 	private fun parseManga(jo: JSONObject): Manga {
 		val id = jo.getString("id")
-		val slug = jo.getString("slug")
 		return Manga(
 			id = generateUid(id),
 			url = id,
-			publicUrl = "https://${domain}/manga/$slug",
+			publicUrl = getPublicUrl(jo),
 			title = jo.getString("title"),
 			altTitles = collectAltTitles(jo),
 			coverUrl = jo.getStringOrNull("coverUrl")?.toAbsoluteUrl(domain),
@@ -80,6 +81,7 @@ internal class WaMangaParser(
 			?.joinToString()
 			?.takeUnless { it.isEmpty() }
 		return manga.copy(
+			publicUrl = getPublicUrl(jo),
 			altTitles = collectAltTitles(jo),
 			description = jo.getStringOrNull("description"),
 			tags = parseTags(jo),

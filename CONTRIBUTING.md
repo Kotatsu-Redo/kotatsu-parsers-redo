@@ -56,6 +56,9 @@ All members of the `MangaParser` class are documented. Pay attention to some pec
   `domain`.
 - All IDs must be unique and domain-independent. Use `generateUid` functions with a relative URL or some internal id
   that is unique across the manga source.
+- `Manga.publicUrl` must point to the actual website page, including any type-specific path (for example, WaManga uses
+  `/manga/`, `/manhwa/`, and `/manhua/`). Refresh it from the details response so saved entries do not retain obsolete
+  routes or slugs.
 - The `availableSortOrders` set should not be empty. If your source does not support sorting, specify one most relevant
   value.
 - If you cannot obtain direct links to page images inside the `getPages` method, it is ok to use an intermediate URL
