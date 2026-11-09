@@ -48,7 +48,8 @@ internal class NexusMangasWebViewTest {
 
 	@Test
 	fun onePieceSearchExtractsBothRenderedResults() = runTest {
-		val parser = NexusMangas(PromiseAwareContext())
+		val context = PromiseAwareContext()
+		val parser = NexusMangas(context)
 		val results = parser.getList(
 			offset = 0,
 			order = SortOrder.RELEVANCE,
@@ -60,6 +61,9 @@ internal class NexusMangasWebViewTest {
 		})
 
 		assertEquals(listOf("One Piece", "One Piece Gakuen"), results.map { it.title })
+		assertTrue(
+			context.requestedUrl.startsWith("https://www.nexusmangas.com/search?q=One"),
+		)
 		assertEquals(MangaState.ONGOING, results.first().state)
 		assertEquals(
 			"https://supabase.nexusmangas.com/functions/v1/read-public-media?key=works%2Fcd336f4c-741a-493e-a3c5-ffef1fb4019d%2Fcover%2Fcover_1783103603780.webp",
@@ -164,6 +168,8 @@ internal class NexusMangasWebViewTest {
 	) : MangaLoaderContext() {
 
 		private val delegate = MangaLoaderContextMock
+		var requestedUrl = ""
+			private set
 
 		override val httpClient get() = delegate.httpClient
 		override val cookieJar get() = delegate.cookieJar
@@ -172,6 +178,7 @@ internal class NexusMangasWebViewTest {
 		override suspend fun evaluateJs(script: String): String? = evaluateJs("", script, 10_000L)
 
 		override suspend fun evaluateJs(baseUrl: String, script: String, timeout: Long): String? {
+			requestedUrl = baseUrl
 			// Android WebView serializes an unawaited Promise result as an empty object.
 			if (script.contains("new Promise")) return "{}"
 			val html = when {

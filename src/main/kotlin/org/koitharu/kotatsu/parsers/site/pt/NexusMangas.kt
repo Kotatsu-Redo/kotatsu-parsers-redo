@@ -27,6 +27,7 @@ import org.koitharu.kotatsu.parsers.model.SortOrder
 import org.koitharu.kotatsu.parsers.util.attrAsRelativeUrl
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
+import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
@@ -61,7 +62,7 @@ internal class NexusMangas(context: MangaLoaderContext) :
 		val url = if (query == null) {
 			"https://$domain/ranking"
 		} else {
-			"https://$domain/search"
+			"https://$domain/search?q=" + query.urlEncoded()
 		}
 		val script = if (query == null) {
 			rankingScript(page)
@@ -404,31 +405,20 @@ internal class NexusMangas(context: MangaLoaderContext) :
 				const key = "__nexusMangasSearchState";
 				let state = window[key];
 				if (!state || state.query !== query) {
-					state = window[key] = { query, started: Date.now(), submitted: false };
+					state = window[key] = { query, started: Date.now() };
 				}
 				const text = () => document.body?.innerText || "";
 				const finish = () => document.documentElement?.outerHTML || "";
 				const input = document.querySelector('input[type="search"], input[type="text"], input:not([type])');
-
-				if (!state.submitted) {
-					if (!input && Date.now() - state.started < 15000) return null;
-					if (input) {
-						const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-						if (setter) setter.call(input, query); else input.value = query;
-						input.dispatchEvent(new Event("input", { bubbles: true }));
-						input.dispatchEvent(new Event("change", { bubbles: true }));
-						input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-						input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
-					}
-					state.submitted = true;
-					return null;
-				}
-
-				const links = document.querySelectorAll('a[href*="/obra/"]').length;
-				if (text().includes("Realize uma ação para continuar acessando") ||
-					text().includes("Acesso a todo o site por 24 horas") ||
-					(links > 0 && text().toLocaleLowerCase().includes("resultados")) ||
-					text().includes("0 resultados") || Date.now() - state.started > 30000) {
+				const pageText = text();
+				const hasResultCount = /\b\d+\s+resultados?\b/i.test(pageText) ||
+					/NENHUM RESULTADO/i.test(pageText);
+				const inputMatchesQuery = !input ||
+					input.value.trim().toLocaleLowerCase() === query.trim().toLocaleLowerCase();
+				if (pageText.includes("Realize uma ação para continuar acessando") ||
+					pageText.includes("Acesso a todo o site por 24 horas") ||
+					(inputMatchesQuery && hasResultCount) ||
+					Date.now() - state.started > 30000) {
 					return finish();
 				}
 				return null;
