@@ -23,7 +23,6 @@ import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.*
 import java.text.DateFormat
 import java.text.SimpleDateFormat
-import java.time.Instant
 import java.util.*
 
 @MangaSourceParser("ASURASCANS", "AsuraComic", "en")
@@ -480,7 +479,11 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		val chapterNum = pathMatch?.groupValues?.getOrNull(2)
 
 		if (seriesSlug != null && chapterNum != null) {
-			fetchPagesFromApi(seriesSlug, chapterNum, null)?.takeIf { it.isNotEmpty() }?.let { return it }
+			when (val apiResult = fetchPagesFromApi(seriesSlug, chapterNum, null)) {
+				is ApiPagesResult.Pages -> return apiResult.pages
+				ApiPagesResult.Locked -> return emptyList()
+				ApiPagesResult.Unavailable -> Unit
+			}
 		}
 
 		val doc = fetchChapterDocument(cleanPath, seriesSlug, chapterNum)
@@ -673,10 +676,10 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		if (resolvedChapterNum != null) {
 			val scrapedToken = extractPageTokenFromDoc(doc)
 			if (seriesSlug != null && scrapedToken != null && scrapedToken != DEFAULT_PAGE_TOKEN) {
-				fetchPagesFromApi(seriesSlug, resolvedChapterNum, doc)?.let { return it }
+				(fetchPagesFromApi(seriesSlug, resolvedChapterNum, doc) as? ApiPagesResult.Pages)?.pages?.let { return it }
 			}
 			if (docSlug != null && docSlug != seriesSlug) {
-				fetchPagesFromApi(docSlug, resolvedChapterNum, doc)?.let { return it }
+				(fetchPagesFromApi(docSlug, resolvedChapterNum, doc) as? ApiPagesResult.Pages)?.pages?.let { return it }
 			}
 		}
 		return null
@@ -775,11 +778,17 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 			?.firstNotNullOfOrNull { pageTokenRegex.find(it.data())?.groupValues?.getOrNull(1) }
 	}
 
+	private sealed interface ApiPagesResult {
+		data class Pages(val pages: List<MangaPage>) : ApiPagesResult
+		data object Locked : ApiPagesResult
+		data object Unavailable : ApiPagesResult
+	}
+
 	private suspend fun fetchPagesFromApi(
 		slug: String,
 		chapterNum: String,
 		doc: Document?,
-	): List<MangaPage>? {
+	): ApiPagesResult {
 		val pageToken = extractPageTokenFromDoc(doc) ?: DEFAULT_PAGE_TOKEN
 		val headersBuilder = Headers.Builder().set("X-Page-Token", pageToken)
 		val accessToken = findAccessTokenCookie()
@@ -788,12 +797,18 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		}
 		val json = runCatchingCancellable {
 			webClient.httpGet("$apiUrl/series/$slug/chapters/$chapterNum", headersBuilder.build()).parseJson()
-		}.getOrNull() ?: return null
-		val pagesArray = json.optJSONObject("data")?.optJSONObject("chapter")?.optJSONArray("pages")
+		}.getOrNull() ?: return ApiPagesResult.Unavailable
+		val dataObj = json.optJSONObject("data")
+		if (dataObj?.getBooleanOrDefault("is_locked", false) == true || json.getBooleanOrDefault("is_locked", false)) {
+			return ApiPagesResult.Locked
+		}
+		val pagesArray = dataObj?.optJSONObject("chapter")?.optJSONArray("pages")
 			?: json.optJSONObject("chapter")?.optJSONArray("pages")
+			?: dataObj?.optJSONArray("pages")
 			?: json.optJSONArray("pages")
-			?: return null
-		return parsePageJsonArray(pagesArray)
+			?: return ApiPagesResult.Unavailable
+		val pages = parsePageJsonArray(pagesArray)?.takeIf { it.isNotEmpty() } ?: return ApiPagesResult.Unavailable
+		return ApiPagesResult.Pages(pages)
 	}
 
 	private fun parsePageJsonArray(pagesArray: JSONArray): List<MangaPage>? {
@@ -860,7 +875,8 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		val series = fetchSeriesJson(seriesSlug) ?: return null
 		val publicUrlPath = series.getStringOrNull("public_url") ?: series.getStringOrNull("publicUrl")
 		rememberSlugToken(publicUrlPath)
-		val chapters = fetchChaptersFromApi(seriesSlug, cutoffTime)
+		val liveSlug = publicUrlPath?.trim('/')?.substringAfter("comics/", "")?.substringBefore('/')?.nullIfEmpty()
+		val chapters = fetchChaptersFromApi(seriesSlug, liveSlug, series, cutoffTime)
 			?: fetchChaptersFromHtmlFallback(seriesSlug, cutoffTime)
 			?: emptyList()
 		val description = series.getStringOrNull("description")
@@ -930,15 +946,46 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		return null
 	}
 
-	private suspend fun fetchChaptersFromApi(seriesSlug: String, cutoffTime: Long): List<MangaChapter>? {
+	private suspend fun fetchChaptersFromApi(
+		seriesSlug: String,
+		liveSlug: String?,
+		series: JSONObject,
+		cutoffTime: Long,
+	): List<MangaChapter>? {
+		var bestArray = fetchRawChaptersArray(seriesSlug)
+		val hasTokenizedLiveSlug = liveSlug != null && !liveSlug.equals(seriesSlug, ignoreCase = true)
+		if (hasTokenizedLiveSlug && (bestArray == null || isChaptersArrayBehindSeries(bestArray, series))) {
+			val liveArray = fetchRawChaptersArray(liveSlug)
+			if (liveArray != null && (bestArray == null || maxChapterNumber(liveArray) >= maxChapterNumber(bestArray))) {
+				bestArray = liveArray
+			}
+		}
+		val arr = bestArray ?: return null
+		return parseApiChaptersArray(arr, seriesSlug, cutoffTime)
+	}
+
+	private suspend fun fetchRawChaptersArray(slug: String): JSONArray? {
 		val json = runCatchingCancellable {
-			webClient.httpGet("$apiUrl/series/$seriesSlug/chapters").parseJson()
+			webClient.httpGet("$apiUrl/series/$slug/chapters").parseJson()
 		}.getOrNull() ?: return null
-		val arr = json.optJSONArray("data")
+		return json.optJSONArray("data")
 			?: json.optJSONArray("chapters")
 			?: json.optJSONObject("data")?.optJSONArray("chapters")
-			?: return null
-		return parseApiChaptersArray(arr, seriesSlug, cutoffTime)
+	}
+
+	private fun maxChapterNumber(arr: JSONArray): Float {
+		var max = -1f
+		for (i in 0 until arr.length()) {
+			val num = (arr.opt(i) as? JSONObject)?.getFloatOrDefault("number", -1f) ?: -1f
+			if (num > max) max = num
+		}
+		return max
+	}
+
+	private fun isChaptersArrayBehindSeries(arr: JSONArray, series: JSONObject): Boolean {
+		val latestArr = series.optJSONArray("latest_chapters") ?: series.optJSONArray("latestChapters") ?: return false
+		val expectedMax = maxChapterNumber(latestArr)
+		return expectedMax >= 0f && maxChapterNumber(arr) + 0.0001f < expectedMax
 	}
 
 	private fun findAccessTokenCookie(): String? {
@@ -963,14 +1010,18 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		val isLoggedIn = !findAccessTokenCookie().isNullOrBlank()
 		val now = System.currentTimeMillis()
 		return arr.mapJSONNotNull { obj ->
-			val hasLockField = obj.has("is_premium") || obj.has("is_locked") || obj.has("early_access_until")
-			val isLocked = obj.getBooleanOrDefault("is_premium", false) ||
-				obj.getBooleanOrDefault("is_locked", false) ||
-				(obj.getStringOrNull("early_access_until")?.let(::parseIsoDate) ?: 0L) > now
-			if (isLocked && !isLoggedIn) return@mapJSONNotNull null
-
 			val number = obj.getFloatOrDefault("number", -1f)
 			if (number < 0f) return@mapJSONNotNull null
+			val uploadDate = parseIsoDate(
+				obj.getStringOrNull("published_at")
+					?: obj.getStringOrNull("publishedAt")
+					?: obj.getStringOrNull("created_at")
+					?: obj.getStringOrNull("createdAt"),
+			)
+			if (!isLoggedIn && isChapterLocked(obj, uploadDate, now, cutoffTime)) {
+				return@mapJSONNotNull null
+			}
+
 			val numberStr = number.formatSimple()
 			val urlRelative = "/comics/$seriesSlug/chapter/$numberStr"
 			val chapterTitle = obj.getStringOrNull("title")?.trim()?.nullIfEmpty()
@@ -978,12 +1029,6 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 				"Chapter $numberStr - $chapterTitle"
 			} else {
 				"Chapter $numberStr"
-			}
-			val uploadDate = parseIsoDate(
-				obj.getStringOrNull("published_at") ?: obj.getStringOrNull("created_at"),
-			)
-			if (!isLoggedIn && !hasLockField && uploadDate != 0L && uploadDate > cutoffTime) {
-				return@mapJSONNotNull null
 			}
 			MangaChapter(
 				id = generateUid(urlRelative),
@@ -996,8 +1041,60 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 				branch = null,
 				source = source,
 			)
-		}.sortedBy { it.number }
+		}.distinctBy { it.id }.sortedBy { it.number }
 	}
+
+	private fun isChapterLocked(
+		obj: JSONObject,
+		uploadDate: Long,
+		now: Long,
+		cutoffTime: Long,
+	): Boolean {
+		if (obj.getBooleanOrDefault("is_locked", false) || obj.getBooleanOrDefault("isLocked", false)) {
+			return true
+		}
+		if (!obj.getStringOrNull("access_gate").isNullOrBlank() || !obj.getStringOrNull("accessGate").isNullOrBlank()) {
+			return true
+		}
+
+		val rawUnlock = obj.getStringOrNull("early_access_until")
+			?: obj.getStringOrNull("earlyAccessUntil")
+			?: obj.getStringOrNull("unlock_time")
+			?: obj.getStringOrNull("unlockTime")
+			?: obj.getStringOrNull("available_at")
+			?: obj.getStringOrNull("availableAt")
+		if (rawUnlock != null) {
+			val unlockAt = parseIsoDate(rawUnlock)
+			// Asura leaves is_premium=true on formerly early-access chapters even after
+			// early_access_until has elapsed and the chapter is publicly readable.
+			return unlockAt <= 0L || unlockAt > now
+		}
+
+		if (obj.hasNonNull("is_locked") || obj.hasNonNull("isLocked")) {
+			return false
+		}
+
+		val isPremium = obj.getBooleanOrDefault("is_premium", false) ||
+			obj.getBooleanOrDefault("isPremium", false)
+		if (isPremium) {
+			val hasZeroPageCount = (obj.hasNonNull("page_count") && obj.getIntOrDefault("page_count", -1) == 0) ||
+				(obj.hasNonNull("pageCount") && obj.getIntOrDefault("pageCount", -1) == 0)
+			if (hasZeroPageCount) {
+				return true
+			}
+			return uploadDate <= 0L || uploadDate > cutoffTime
+		}
+
+		val hasLockMetadata = obj.has("is_premium") || obj.has("isPremium") ||
+			obj.has("is_locked") || obj.has("isLocked") ||
+			obj.has("early_access_until") || obj.has("earlyAccessUntil") ||
+			obj.has("unlock_time") || obj.has("unlockTime") ||
+			obj.has("available_at") || obj.has("availableAt")
+		return !hasLockMetadata && uploadDate > cutoffTime
+	}
+
+	private fun JSONObject.hasNonNull(name: String): Boolean =
+		opt(name)?.takeUnless { it === JSONObject.NULL } != null
 
 	private fun unwrapAstro(value: Any?): Any? = when (value) {
 		is JSONArray -> when {
@@ -1091,8 +1188,36 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 
 	private fun parseIsoDate(raw: String?): Long {
 		val str = raw?.trim()?.nullIfEmpty() ?: return 0L
+		val match = isoTimestampRegex.matchEntire(str) ?: return 0L
 		return runCatching {
-			Instant.parse(str).toEpochMilli()
+			val year = match.groupValues[1].toInt()
+			val month = match.groupValues[2].toInt()
+			val day = match.groupValues[3].toInt()
+			val hour = match.groupValues[4].ifEmpty { "0" }.toInt()
+			val minute = match.groupValues[5].ifEmpty { "0" }.toInt()
+			val second = match.groupValues[6].ifEmpty { "0" }.toInt()
+			val fraction = match.groupValues[7]
+			val millis = if (fraction.isEmpty()) {
+				0
+			} else {
+				fraction.take(3).padEnd(3, '0').toInt()
+			}
+			val calendar = GregorianCalendar(UTC_TIME_ZONE, Locale.ROOT).apply {
+				isLenient = false
+				clear()
+				set(year, month - 1, day, hour, minute, second)
+				set(Calendar.MILLISECOND, millis)
+			}
+			var epochMs = calendar.timeInMillis
+			val offsetSign = match.groupValues[9]
+			if (offsetSign.isNotEmpty()) {
+				val offsetHours = match.groupValues[10].toInt()
+				val offsetMinutes = match.groupValues[11].toInt()
+				if (offsetHours > 23 || offsetMinutes > 59) return 0L
+				val totalOffsetMs = (offsetHours * 60L + offsetMinutes) * 60_000L
+				epochMs += if (offsetSign == "+") -totalOffsetMs else totalOffsetMs
+			}
+			epochMs
 		}.getOrDefault(0L)
 	}
 
@@ -1174,6 +1299,11 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 
 	private companion object {
 		private const val CHAPTER_HIDE_WINDOW_MS = 6L * 60L * 60L * 1000L
+		private val UTC_TIME_ZONE: TimeZone = TimeZone.getTimeZone("GMT")
+		private val isoTimestampRegex = Regex(
+			"^(\\d{4})-(\\d{2})-(\\d{2})(?:[T\\s](\\d{2}):(\\d{2})(?::(\\d{2})(?:\\.(\\d+))?)?(Z|([+-])(\\d{2}):?(\\d{2}))?)?$",
+			RegexOption.IGNORE_CASE,
+		)
 		private const val DEFAULT_PAGE_TOKEN = "asura-reader-2026"
 		private const val TILES_FRAGMENT_PREFIX = "tiles="
 		private const val DEFAULT_TILE_COLS = 4

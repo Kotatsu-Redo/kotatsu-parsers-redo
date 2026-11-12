@@ -367,6 +367,127 @@ internal class AsuraScansTest {
 		)
 	}
 
+
+	@Test
+	fun unlockedEarlyAccessChaptersAppearWhileActivePaywallStaysHidden() = runTest {
+		val now = System.currentTimeMillis()
+		fun isoUtc(epochMs: Long): String = java.time.Instant.ofEpochMilli(epochMs).toString()
+
+		val futureUnlock = isoUtc(now + 4L * 3600_000L)
+		val recentPublish = isoUtc(now - 2L * 3600_000L)
+		val expiredUnlock = isoUtc(now - 18L * 3600_000L)
+		val ch124Publish = isoUtc(now - 26L * 3600_000L)
+
+		val seriesJson = """
+			{
+				"series": {
+					"slug": "myst-might-mayhem",
+					"public_url": "/comics/myst-might-mayhem-a1b2c3d4",
+					"title": "Myst, Might, Mayhem",
+					"status": "ongoing",
+					"latest_chapters": [{"number": 124}]
+				}
+			}
+		""".trimIndent()
+
+		val staleCleanSlugChaptersJson = """
+			{
+				"data": [
+					{"number": 123, "title": "Old Cached", "is_premium": false, "published_at": "2026-11-03T15:00:00.123456Z"}
+				]
+			}
+		""".trimIndent()
+
+		val liveTokenChaptersJson = """
+			{
+				"data": [
+					{"id": 5, "number": 125, "title": "Still Early Access", "page_count": 28, "is_premium": true, "early_access_until": "$futureUnlock", "published_at": "$recentPublish"},
+					{"id": 4, "number": 124, "title": "Unlocked Chapter", "page_count": 24, "is_premium": true, "early_access_until": "$expiredUnlock", "published_at": "$ch124Publish"},
+					{"id": 3, "number": 123.5, "title": "Offset Timestamp", "page_count": 18, "is_premium": true, "early_access_until": "2026-11-04T01:33:48.488671+02:00", "published_at": "2026-11-03T19:33:48.488671+02:00"},
+					{"id": 2, "number": 123, "title": "Nov 3 Release", "page_count": 22, "is_premium": true, "early_access_until": null, "published_at": "2026-11-03T15:00:00.123456Z"},
+					{"id": 22, "number": 123, "title": "Duplicate Row", "page_count": 22, "is_premium": false, "published_at": "2026-11-03T15:00:00.123456Z"},
+					{"id": 1, "number": 122.5, "title": "Zero Pages Locked", "page_count": 0, "is_premium": true, "early_access_until": null, "published_at": "2026-11-01T12:00:00Z"},
+					{"id": 0, "number": 122.1, "title": "Malformed Unlock", "page_count": 20, "is_premium": false, "early_access_until": "soon", "published_at": "2026-11-01T12:00:00Z"}
+				]
+			}
+		""".trimIndent()
+
+		val astroFallbackHtml = """
+			<html><head><title>Astro Series</title></head><body>
+			<astro-island props="{&quot;chapters&quot;:[1,[[0,{&quot;number&quot;:[0,125],&quot;is_premium&quot;:[0,true],&quot;early_access_until&quot;:[0,&quot;$futureUnlock&quot;],&quot;published_at&quot;:[0,&quot;$recentPublish&quot;]}],[0,{&quot;number&quot;:[0,124],&quot;title&quot;:[0,&quot;Astro Unlocked&quot;],&quot;is_premium&quot;:[0,true],&quot;early_access_until&quot;:[0,&quot;$expiredUnlock&quot;],&quot;published_at&quot;:[0,&quot;$ch124Publish&quot;]}]]]}"></astro-island>
+			</body></html>
+		""".trimIndent()
+
+		val lockedReaderJson = """
+			{
+				"data": {
+					"is_locked": true,
+					"unlock_time": "$futureUnlock",
+					"chapter": {
+						"number": 125,
+						"is_premium": true,
+						"pages": [{"url": "https://cdn.asurascans.com/asura-images/placeholder.webp"}]
+					}
+				}
+			}
+		""".trimIndent()
+
+		val requestedKeys = ArrayList<String>()
+		val context = TestContext { req ->
+			val key = "${req.url.host}${req.url.encodedPath}"
+			requestedKeys += key
+			when (key) {
+				"api.asurascans.com/api/series/myst-might-mayhem" -> 200 to seriesJson
+				"api.asurascans.com/api/series/myst-might-mayhem/chapters" -> 200 to staleCleanSlugChaptersJson
+				"api.asurascans.com/api/series/myst-might-mayhem-a1b2c3d4/chapters" -> 200 to liveTokenChaptersJson
+				"api.asurascans.com/api/series/myst-might-mayhem/chapters/125" -> 200 to lockedReaderJson
+				"asurascans.com/comics/astro-only-series" -> 200 to astroFallbackHtml
+				else -> 404 to "Not Found"
+			}
+		}
+
+		val parser = AsuraScansParser(context)
+		val seed = Manga(
+			id = 42L,
+			title = "Myst, Might, Mayhem",
+			altTitles = emptySet(),
+			url = "/comics/myst-might-mayhem",
+			publicUrl = "https://asurascans.com/comics/myst-might-mayhem",
+			rating = RATING_UNKNOWN,
+			contentRating = null,
+			coverUrl = null,
+			tags = emptySet(),
+			state = null,
+			authors = emptySet(),
+			source = MangaParserSource.ASURASCANS,
+		)
+
+		val details = parser.getDetails(seed)
+		val chapters = requireNotNull(details.chapters)
+		assertEquals(
+			listOf(
+				"/comics/myst-might-mayhem/chapter/123",
+				"/comics/myst-might-mayhem/chapter/123.5",
+				"/comics/myst-might-mayhem/chapter/124",
+			),
+			chapters.map { it.url },
+		)
+		assertEquals("Chapter 124 - Unlocked Chapter", chapters.last().title)
+		val expectedOffsetEpoch = java.time.Instant.parse("2026-11-03T17:33:48.488Z").toEpochMilli()
+		assertEquals(expectedOffsetEpoch, chapters[1].uploadDate)
+
+		requestedKeys.clear()
+		val lockedCh = MangaChapter(125L, "Chapter 125", 125f, 0, "/comics/myst-might-mayhem/chapter/125", null, 0L, null, MangaParserSource.ASURASCANS)
+		assertEquals(emptyList<String>(), parser.getPages(lockedCh).map { it.url })
+		assertEquals(listOf("api.asurascans.com/api/series/myst-might-mayhem/chapters/125"), requestedKeys)
+
+		val astroDetails = parser.getDetails(seed.copy(url = "/comics/astro-only-series", publicUrl = "https://asurascans.com/comics/astro-only-series"))
+		assertEquals(
+			listOf("/comics/astro-only-series/chapter/124"),
+			requireNotNull(astroDetails.chapters).map { it.url },
+		)
+	}
+
 	private class RecordingBitmap(
 		override val width: Int,
 		override val height: Int,
