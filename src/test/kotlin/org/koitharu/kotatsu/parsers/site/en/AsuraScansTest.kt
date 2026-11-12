@@ -2,7 +2,6 @@ package org.koitharu.kotatsu.parsers.site.en
 
 import kotlinx.coroutines.test.runTest
 import okhttp3.CookieJar
-import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -59,22 +58,20 @@ internal class AsuraScansTest {
 
 		val browseUpcomingHtml = """
 			<html><body>
-			<div id="series-grid">
-				<div class="series-card">
-					<a href="/comics/upcoming-work-7f873ca6">
-						<img src="https://gg.asuracomic.net/storage/media/2/cover.webp" />
-						<h3>Upcoming Work</h3>
-						<div class="absolute top-2 right-2"><span>8.5</span></div>
-						<div class="p-3"><span>Manhwa</span><span>Coming Soon</span></div>
-					</a>
-				</div>
+			<div class="grid grid-cols-2">
+				<a href="/comics/upcoming-work-7f873ca6">
+					<img src="https://cdn.asurascans.com/asura-images/covers/upcoming.webp" alt="Upcoming Work" />
+					<span>8.5</span>
+					<span>Manhwa</span>
+					<span>coming soon</span>
+				</a>
 			</div>
 			</body></html>
 		""".trimIndent()
 
-		val requestedUrls = ArrayList<String>()
+		val seenRequests = ArrayList<Request>()
 		val context = TestContext { req ->
-			requestedUrls += req.url.toString()
+			seenRequests += req
 			when ("${req.url.host}${req.url.encodedPath}") {
 				"api.asurascans.com/api/series" -> 200 to apiSeriesListJson
 				"asurascans.com/browse" -> 200 to browseUpcomingHtml
@@ -83,12 +80,15 @@ internal class AsuraScansTest {
 		}
 
 		val parser = AsuraScansParser(context).also { context.parserInterceptor = it }
+		assertEquals("TestAgent/1.0", parser.getRequestHeaders()["User-Agent"])
 
 		val list = parser.getListPage(1, SortOrder.UPDATED, MangaListFilter.EMPTY)
 		assertEquals(
 			listOf("https://api.asurascans.com/api/series?offset=0&limit=20&sort=latest&order=desc"),
-			requestedUrls,
+			seenRequests.map { it.url.toString() },
 		)
+		assertEquals(MangaParserSource.ASURASCANS, seenRequests[0].tag(MangaSource::class.java))
+		assertEquals("https://asurascans.com", seenRequests[0].header("Origin"))
 		assertEquals(2, list.size)
 		assertEquals("/comics/omniscient-readers-viewpoint", list[0].url)
 		assertEquals("https://asurascans.com/comics/omniscient-readers-viewpoint-7f873ca6", list[0].publicUrl)
@@ -97,18 +97,19 @@ internal class AsuraScansTest {
 		assertEquals(RATING_UNKNOWN, list[1].rating)
 		assertEquals(MangaState.FINISHED, list[1].state)
 
-		requestedUrls.clear()
+		seenRequests.clear()
 		val upcomingFilter = MangaListFilter(states = EnumSet.of(MangaState.UPCOMING))
 		val upcoming = parser.getListPage(1, SortOrder.NEWEST, upcomingFilter)
 		assertEquals(1, upcoming.size)
-		assertTrue(requestedUrls.single().startsWith("https://asurascans.com/browse?"))
+		assertTrue(seenRequests.single().url.toString().startsWith("https://asurascans.com/browse?"))
+		assertNull(seenRequests.single().header("Origin"))
 		assertEquals("/comics/upcoming-work", upcoming[0].url)
 		assertEquals(0.85f, upcoming[0].rating, 0.0001f)
 		assertEquals(MangaState.UPCOMING, upcoming[0].state)
 	}
 
 	@Test
-	fun apiFirstDetailsAvoidsHtmlRouteAndFallsBackToTokenizedAstroHtml() = runTest {
+	fun apiFirstDetailsPreservesFavouriteUrlAndFallsBackToTokenizedAstroHtml() = runTest {
 		val seriesJson = """
 			{
 				"data": {
@@ -159,13 +160,13 @@ internal class AsuraScansTest {
 			}
 		}
 
-		val parser = AsuraScansParser(context)
+		val parser = AsuraScansParser(context).also { context.parserInterceptor = it }
 		val seed = Manga(
 			id = 1L,
 			title = "Sample Work",
 			altTitles = emptySet(),
-			url = "/comics/sample-work-7f873ca6",
-			publicUrl = "https://asurascans.com/comics/sample-work-7f873ca6",
+			url = "/series/sample-work-7f873ca6",
+			publicUrl = "https://asurascans.com/series/sample-work-7f873ca6",
 			rating = RATING_UNKNOWN,
 			contentRating = null,
 			coverUrl = null,
@@ -183,6 +184,9 @@ internal class AsuraScansTest {
 			),
 			requestedUrls,
 		)
+		// Stored Favourite url must never be mutated in getDetails so Room identity stays intact
+		assertEquals("/series/sample-work-7f873ca6", details.url)
+		assertEquals("https://asurascans.com/comics/sample-work-7f873ca6", details.publicUrl)
 		assertEquals("Sample Work", details.title)
 		assertEquals("<p>Plot summary</p>", details.description)
 		assertEquals(MangaState.ONGOING, details.state)
@@ -194,10 +198,11 @@ internal class AsuraScansTest {
 		assertEquals(listOf("/comics/sample-work/chapter/1", "/comics/sample-work/chapter/2"), chapters.map { it.url })
 		assertEquals(listOf("Chapter 1", "Chapter 2 - Second"), chapters.map { it.title })
 
-		// Now simulate API outage: parser reuses cached live token without hitting tokenless /comics/sample-work
+		// Simulate API outage: parser reuses cached live token without hitting tokenless /comics/sample-work
 		apiOnline = false
 		requestedUrls.clear()
-		val fallbackDetails = parser.getDetails(seed.copy(url = "/comics/sample-work", publicUrl = "https://asurascans.com/comics/sample-work"))
+		val fallbackDetails = parser.getDetails(seed.copy(url = "/manga/1908287720-sample-work/", publicUrl = "https://asuracomic.net/manga/1908287720-sample-work/"))
+		assertEquals("/manga/1908287720-sample-work/", fallbackDetails.url)
 		assertTrue("asurascans.com/comics/sample-work-7f873ca6" in requestedUrls)
 		assertTrue("asurascans.com/comics/sample-work" !in requestedUrls)
 		assertEquals("Astro Fallback Title", fallbackDetails.title)
@@ -208,7 +213,7 @@ internal class AsuraScansTest {
 	}
 
 	@Test
-	fun apiFirstPagesSendsReaderTokenEncodesTilesAndFallsBackToHtml() = runTest {
+	fun apiFirstPagesSendsReaderTokenEncodesTilesAndFiltersNonPageMedia() = runTest {
 		val apiChapterJson = """
 			{
 				"data": {
@@ -238,6 +243,11 @@ internal class AsuraScansTest {
 				<img src="https://cdn.asurascans.com/asura-images/chapters/orv-300/01.webp" />
 				<img data-src="https://cdn.asurascans.com/asura-images/chapters/orv-300/02.webp" />
 				<img src="https://cdn.asurascans.com/asura-images/avatars/user1.webp" />
+				<img src="https://cdn.asurascans.com/asura-images/profiles/p1.webp" />
+				<img src="https://cdn.asurascans.com/asura-images/comments/meme.webp" />
+				<img src="https://cdn.asurascans.com/asura-images/emojis/fire.webp" />
+				<img src="https://cdn.asurascans.com/asura-images/gifs/react.gif" />
+				<img src="https://asurascans.com/images/decorations/frame.png" />
 			</main>
 			</body></html>
 		""".trimIndent()
@@ -258,7 +268,7 @@ internal class AsuraScansTest {
 			}
 		}
 
-		val parser = AsuraScansParser(context)
+		val parser = AsuraScansParser(context).also { context.parserInterceptor = it }
 
 		val ch2 = MangaChapter(2L, "Chapter 2", 2f, 0, "/comics/sample-work-ab39de10/chapter/2", null, 0L, null, MangaParserSource.ASURASCANS)
 		assertEquals(
@@ -295,7 +305,7 @@ internal class AsuraScansTest {
 	}
 
 	@Test
-	fun interceptMigratesLegacyDomainPreservesCdnSetsHeadersAndDescramblesTiles() = runTest {
+	fun interceptMigratesLegacyDomainPreservesCdnSetsBrowserHeadersAndDescramblesTiles() = runTest {
 		val seenRequests = ArrayList<Request>()
 		val drawnOps = ArrayList<Pair<Rect, Rect>>()
 
@@ -350,12 +360,16 @@ internal class AsuraScansTest {
 		assertEquals("https://asurascans.com/", seenRequests[0].header("Referer"))
 		assertEquals("navigate", seenRequests[0].header("Sec-Fetch-Mode"))
 
+		// Cross-origin API XHR must carry rewritten Origin + CORS headers
 		assertEquals("api.asurascans.com", seenRequests[1].url.host)
-		assertNull(seenRequests[1].header("Origin"))
+		assertEquals("https://asurascans.com", seenRequests[1].header("Origin"))
+		assertEquals("https://asurascans.com/", seenRequests[1].header("Referer"))
 		assertEquals("cors", seenRequests[1].header("Sec-Fetch-Mode"))
+		assertEquals("same-site", seenRequests[1].header("Sec-Fetch-Site"))
 
-		// gg.asuracomic.net CDN host must NEVER be rewritten
+		// gg.asuracomic.net CDN host must NEVER be rewritten and must omit Origin
 		assertEquals("gg.asuracomic.net", seenRequests[2].url.host)
+		assertNull(seenRequests[2].header("Origin"))
 		assertEquals(
 			listOf(
 				Rect(0, 0, 100, 50) to Rect(100, 50, 200, 100),
@@ -367,9 +381,8 @@ internal class AsuraScansTest {
 		)
 	}
 
-
 	@Test
-	fun unlockedEarlyAccessChaptersAppearWhileActivePaywallStaysHidden() = runTest {
+	fun unlockedEarlyAccessAndStaleChaptersMergeHtmlWithoutHidingFreshFreeReleases() = runTest {
 		val now = System.currentTimeMillis()
 		fun isoUtc(epochMs: Long): String = java.time.Instant.ofEpochMilli(epochMs).toString()
 
@@ -382,10 +395,11 @@ internal class AsuraScansTest {
 			{
 				"series": {
 					"slug": "myst-might-mayhem",
-					"public_url": "/comics/myst-might-mayhem-a1b2c3d4",
+					"public_url": "/comics/myst-might-mayhem-f212c582",
 					"title": "Myst, Might, Mayhem",
 					"status": "ongoing",
-					"latest_chapters": [{"number": 124}]
+					"chapter_count": 4,
+					"last_chapter_at": "$ch124Publish"
 				}
 			}
 		""".trimIndent()
@@ -402,7 +416,7 @@ internal class AsuraScansTest {
 			{
 				"data": [
 					{"id": 5, "number": 125, "title": "Still Early Access", "page_count": 28, "is_premium": true, "early_access_until": "$futureUnlock", "published_at": "$recentPublish"},
-					{"id": 4, "number": 124, "title": "Unlocked Chapter", "page_count": 24, "is_premium": true, "early_access_until": "$expiredUnlock", "published_at": "$ch124Publish"},
+					{"id": 4, "number": 124, "title": "Harmony", "page_count": 14, "is_premium": false, "early_access_until": "$expiredUnlock", "published_at": "$ch124Publish"},
 					{"id": 3, "number": 123.5, "title": "Offset Timestamp", "page_count": 18, "is_premium": true, "early_access_until": "2026-11-04T01:33:48.488671+02:00", "published_at": "2026-11-03T19:33:48.488671+02:00"},
 					{"id": 2, "number": 123, "title": "Nov 3 Release", "page_count": 22, "is_premium": true, "early_access_until": null, "published_at": "2026-11-03T15:00:00.123456Z"},
 					{"id": 22, "number": 123, "title": "Duplicate Row", "page_count": 22, "is_premium": false, "published_at": "2026-11-03T15:00:00.123456Z"},
@@ -412,9 +426,17 @@ internal class AsuraScansTest {
 			}
 		""".trimIndent()
 
-		val astroFallbackHtml = """
-			<html><head><title>Astro Series</title></head><body>
-			<astro-island props="{&quot;chapters&quot;:[1,[[0,{&quot;number&quot;:[0,125],&quot;is_premium&quot;:[0,true],&quot;early_access_until&quot;:[0,&quot;$futureUnlock&quot;],&quot;published_at&quot;:[0,&quot;$recentPublish&quot;]}],[0,{&quot;number&quot;:[0,124],&quot;title&quot;:[0,&quot;Astro Unlocked&quot;],&quot;is_premium&quot;:[0,true],&quot;early_access_until&quot;:[0,&quot;$expiredUnlock&quot;],&quot;published_at&quot;:[0,&quot;$ch124Publish&quot;]}]]]}"></astro-island>
+		val htmlAnchorFallback = """
+			<html><head><title>Fresh Anchor Series - Asura Scans</title></head><body>
+			<h1>Fresh Anchor Series</h1>
+			<a class="group" href="/comics/fresh-anchor-series-f212c582/chapter/1#resume"><h3>First Chapter</h3></a>
+			<a class="group" href="/comics/fresh-anchor-series-f212c582/chapter/124">
+				<h3>Chapter 124</h3><h3>Harmony</h3><p>5 minutes ago</p>
+			</a>
+			<a class="group" href="/comics/fresh-anchor-series-f212c582/chapter/125">
+				<svg class="lock-icon"></svg>
+				<h3>Chapter 125</h3><h3>Locked Preview</h3><p>2 minutes ago</p>
+			</a>
 			</body></html>
 		""".trimIndent()
 
@@ -439,20 +461,20 @@ internal class AsuraScansTest {
 			when (key) {
 				"api.asurascans.com/api/series/myst-might-mayhem" -> 200 to seriesJson
 				"api.asurascans.com/api/series/myst-might-mayhem/chapters" -> 200 to staleCleanSlugChaptersJson
-				"api.asurascans.com/api/series/myst-might-mayhem-a1b2c3d4/chapters" -> 200 to liveTokenChaptersJson
+				"api.asurascans.com/api/series/myst-might-mayhem-f212c582/chapters" -> 200 to liveTokenChaptersJson
 				"api.asurascans.com/api/series/myst-might-mayhem/chapters/125" -> 200 to lockedReaderJson
-				"asurascans.com/comics/astro-only-series" -> 200 to astroFallbackHtml
+				"asurascans.com/comics/fresh-anchor-series-f212c582" -> 200 to htmlAnchorFallback
 				else -> 404 to "Not Found"
 			}
 		}
 
-		val parser = AsuraScansParser(context)
+		val parser = AsuraScansParser(context).also { context.parserInterceptor = it }
 		val seed = Manga(
 			id = 42L,
 			title = "Myst, Might, Mayhem",
 			altTitles = emptySet(),
-			url = "/comics/myst-might-mayhem",
-			publicUrl = "https://asurascans.com/comics/myst-might-mayhem",
+			url = "/manga/1908287720-myst-might-mayhem/",
+			publicUrl = "https://asuracomic.net/manga/1908287720-myst-might-mayhem/",
 			rating = RATING_UNKNOWN,
 			contentRating = null,
 			coverUrl = null,
@@ -463,28 +485,30 @@ internal class AsuraScansTest {
 		)
 
 		val details = parser.getDetails(seed)
+		assertEquals("/manga/1908287720-myst-might-mayhem/", details.url)
 		val chapters = requireNotNull(details.chapters)
 		assertEquals(
 			listOf(
+				"/comics/myst-might-mayhem/chapter/122.1",
 				"/comics/myst-might-mayhem/chapter/123",
 				"/comics/myst-might-mayhem/chapter/123.5",
 				"/comics/myst-might-mayhem/chapter/124",
 			),
 			chapters.map { it.url },
 		)
-		assertEquals("Chapter 124 - Unlocked Chapter", chapters.last().title)
+		assertEquals("Chapter 124 - Harmony", chapters.last().title)
 		val expectedOffsetEpoch = java.time.Instant.parse("2026-11-03T17:33:48.488Z").toEpochMilli()
-		assertEquals(expectedOffsetEpoch, chapters[1].uploadDate)
+		assertEquals(expectedOffsetEpoch, chapters[2].uploadDate)
 
 		requestedKeys.clear()
 		val lockedCh = MangaChapter(125L, "Chapter 125", 125f, 0, "/comics/myst-might-mayhem/chapter/125", null, 0L, null, MangaParserSource.ASURASCANS)
 		assertEquals(emptyList<String>(), parser.getPages(lockedCh).map { it.url })
 		assertEquals(listOf("api.asurascans.com/api/series/myst-might-mayhem/chapters/125"), requestedKeys)
 
-		val astroDetails = parser.getDetails(seed.copy(url = "/comics/astro-only-series", publicUrl = "https://asurascans.com/comics/astro-only-series"))
+		val anchorDetails = parser.getDetails(seed.copy(url = "/comics/fresh-anchor-series", publicUrl = "https://asurascans.com/comics/fresh-anchor-series"))
 		assertEquals(
-			listOf("/comics/astro-only-series/chapter/124"),
-			requireNotNull(astroDetails.chapters).map { it.url },
+			listOf("/comics/fresh-anchor-series/chapter/124"),
+			requireNotNull(anchorDetails.chapters).map { it.url },
 		)
 	}
 
