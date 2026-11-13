@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("ZINMANGA_CC", "ZinManga.cc", "en")
 internal class ZinMangaCc(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ZINMANGA_CC, "zinmanga.cc")

@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken("Website, come back soon")
+@Broken("Website under maintenance")
 @MangaSourceParser("ASTRALMANGA", "AstralManga", "fr")
 internal class AstralManga(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ASTRALMANGA, "astral-manga.fr") {

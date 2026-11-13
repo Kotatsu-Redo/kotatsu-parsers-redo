@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mmrcms.MmrcmsParser
 import java.util.*
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("SCANMANGA", "ScanManga", "fr")
 internal class ScanManga(context: MangaLoaderContext) :
 	MmrcmsParser(context, MangaParserSource.SCANMANGA, "scan-manga.me") {

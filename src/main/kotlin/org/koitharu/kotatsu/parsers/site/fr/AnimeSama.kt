@@ -30,7 +30,7 @@ import org.koitharu.kotatsu.parsers.util.urlDecode
 import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.util.EnumSet
 
-@Broken("Site inaccessible (timeout)")
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("ANIMESAMA", "AnimeSama", "fr")
 internal class AnimeSama(context: MangaLoaderContext) :
 	PagedMangaParser(context, source = MangaParserSource.ANIMESAMA, 96) {

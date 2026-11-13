@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.keyoapp.KeyoappParser
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("ASTRAMES", "Astrames", "fr")
 internal class Astrames(context: MangaLoaderContext) :
 	KeyoappParser(context, MangaParserSource.ASTRAMES, "astrames.fr")

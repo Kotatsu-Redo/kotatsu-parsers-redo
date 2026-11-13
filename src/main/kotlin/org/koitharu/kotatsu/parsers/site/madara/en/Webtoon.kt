@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site returns HTTP 5xx")
 @MangaSourceParser("WEBTOON", "Webtoon.uk", "en")
 internal class Webtoon(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.WEBTOON, "webtoon.uk", 20) {

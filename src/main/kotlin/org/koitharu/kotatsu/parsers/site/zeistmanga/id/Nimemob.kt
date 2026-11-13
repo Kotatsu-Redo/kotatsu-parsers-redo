@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.zeistmanga.ZeistMangaParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("NIMEMOB", "Nimemob", "id")
 internal class Nimemob(context: MangaLoaderContext) :
 	ZeistMangaParser(context, MangaParserSource.NIMEMOB, "www.nimemob.my.id")

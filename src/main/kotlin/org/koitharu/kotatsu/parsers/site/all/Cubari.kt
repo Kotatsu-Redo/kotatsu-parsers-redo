@@ -28,7 +28,7 @@ import java.util.*
  * sharing the same chapter number but carrying distinct [MangaChapter.branch] values.
  */
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("CUBARI", "Cubari", type = ContentType.OTHER)
 internal class CubariParser(context: MangaLoaderContext) :
 	AbstractMangaParser(context, MangaParserSource.CUBARI) {

@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
 //Manga +18 require login.
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("VIYAFANSUB", "ViyaFansub", "tr", ContentType.HENTAI)
 internal class ViyaFansub(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.VIYAFANSUB, "viyafansub.com")

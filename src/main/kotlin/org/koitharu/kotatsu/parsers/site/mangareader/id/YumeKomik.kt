@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("YUMEKOMIK", "YumeKomik", "id")
 internal class YumeKomik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.YUMEKOMIK, "yumekomik.com", pageSize = 20, searchPageSize = 10)

@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("ONEPIECEEX", "OnePieceEx", "pt")
 internal class OnePieceEx(context: MangaLoaderContext) :
 	SinglePageMangaParser(context, MangaParserSource.ONEPIECEEX) {

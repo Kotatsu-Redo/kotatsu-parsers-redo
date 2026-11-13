@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Blocked by Cloudflare challenge")
 @MangaSourceParser("EPSILONSOFT", "EpsilonSoft", "fr")
 internal class EpsilonSoft(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.EPSILONSOFT, "beta.epsilonsoft.to") {

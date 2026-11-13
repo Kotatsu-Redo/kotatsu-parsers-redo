@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("NABISCANS", "NabiScans", "tr")
 internal class NabiScans(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.NABISCANS, "nabiscans.com") {

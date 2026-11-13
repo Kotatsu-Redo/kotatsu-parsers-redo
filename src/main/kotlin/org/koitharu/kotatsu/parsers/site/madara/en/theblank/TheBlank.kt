@@ -20,7 +20,7 @@ import java.util.Base64
 import okio.Buffer
 import java.util.concurrent.ConcurrentHashMap
 
-@Broken
+@Broken("Blocked by Cloudflare challenge")
 @MangaSourceParser("THEBLANK", "TheBlank", "en", ContentType.HENTAI)
 internal class TheBlank(context: MangaLoaderContext) :
     PagedMangaParser(context, MangaParserSource.THEBLANK, 24) {

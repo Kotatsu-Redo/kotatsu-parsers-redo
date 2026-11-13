@@ -36,7 +36,7 @@ import java.util.Calendar
 import java.util.EnumSet
 
 
-@Broken ("Website under reconstruction")
+@Broken("Website under maintenance")
 @MangaSourceParser("PHENIXSCANS", "PhenixScans", "fr")
 internal class PhenixscansParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.PHENIXSCANS, 18) {

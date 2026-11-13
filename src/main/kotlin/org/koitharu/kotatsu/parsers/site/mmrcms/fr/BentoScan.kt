@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mmrcms.MmrcmsParser
 import java.util.*
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("BENTOSCAN", "BentoScan", "fr")
 internal class BentoScan(context: MangaLoaderContext) :
 	MmrcmsParser(context, MangaParserSource.BENTOSCAN, "bentoscan.com") {

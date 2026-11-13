@@ -10,7 +10,7 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Not dead, changed template")
 @MangaSourceParser("NEOX_SCANS", "NeoxScans", "pt")
 internal class Neoxscans(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.NEOX_SCANS, "mangalivre.net", 18) {

@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Not dead, changed template")
 @MangaSourceParser("KOMIKAV", "KomikAv", "id")
 internal class KomikAvParser(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KOMIKAV, "komikav.net", pageSize = 20, searchPageSize = 10) {

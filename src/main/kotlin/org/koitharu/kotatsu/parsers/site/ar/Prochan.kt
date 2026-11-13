@@ -17,7 +17,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken("Can't do it beceause of how they load images by stripes like tf :(")
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("PROCHAN", "Prochan", "ar")
 internal class Prochan(context: MangaLoaderContext) : PagedMangaParser(
 	context,

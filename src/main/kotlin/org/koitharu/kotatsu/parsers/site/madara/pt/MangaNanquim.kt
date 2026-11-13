@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("MANGANANQUIM", "MangaNanquim", "pt")
 internal class MangaNanquim(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGANANQUIM, "mangananquim.site", 10) {

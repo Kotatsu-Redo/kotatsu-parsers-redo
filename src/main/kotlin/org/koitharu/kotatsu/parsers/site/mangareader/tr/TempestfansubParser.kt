@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("TEMPESTFANSUB", "TempestFansub.Com", "tr")
 internal class TempestfansubParser(context: MangaLoaderContext) :
 	MangaReaderParser(

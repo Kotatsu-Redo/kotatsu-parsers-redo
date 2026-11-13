@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.util.oneOrThrowIfMany
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.urlEncoded
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("KOMIKSAN", "KomikSan", "id")
 internal class KomikSan(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KOMIKSAN, "komiksan.link", pageSize = 40, searchPageSize = 10) {

@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import java.util.*
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("BIRDTOON", "BirdToon", "id", ContentType.HENTAI)
 internal class BirdToon(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.BIRDTOON, "birdtoon.shop", 10) {

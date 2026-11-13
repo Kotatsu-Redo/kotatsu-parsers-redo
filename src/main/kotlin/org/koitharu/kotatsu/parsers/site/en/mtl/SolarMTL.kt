@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.model.ContentType
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("SOLARMTL", "SolarMTL", "en", type = ContentType.MANGA)
 internal class SolarMTL(context: MangaLoaderContext):
     MTLParser(context, source = MangaParserSource.SOLARMTL, "solarmtl.com")

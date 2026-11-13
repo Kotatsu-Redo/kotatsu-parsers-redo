@@ -14,7 +14,7 @@ import org.koitharu.kotatsu.parsers.util.parseSafe
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("LUACOMIC_COM", "Lua Scans", "en")
 internal class LuaScans(context: MangaLoaderContext) :
     HeanCms(context, MangaParserSource.LUACOMIC_COM, "luacomic.com") {

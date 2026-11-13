@@ -267,7 +267,7 @@ internal abstract class NineMangaParser(
         return 0L
     }
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_EN", "NineManga English", "en")
     class English(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -275,7 +275,7 @@ internal abstract class NineMangaParser(
         "www.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_ES", "NineManga Español", "es")
     class Spanish(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -283,7 +283,7 @@ internal abstract class NineMangaParser(
         "es.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_RU", "NineManga Русский", "ru")
     class Russian(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -291,7 +291,7 @@ internal abstract class NineMangaParser(
         "ru.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_DE", "NineManga Deutsch", "de")
     class Deutsch(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -299,7 +299,7 @@ internal abstract class NineMangaParser(
         "de.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_BR", "NineManga Brasil", "pt")
     class Brazil(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -307,7 +307,7 @@ internal abstract class NineMangaParser(
         "br.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_IT", "NineManga Italiano", "it")
     class Italiano(context: MangaLoaderContext) : NineMangaParser(
         context,
@@ -315,7 +315,7 @@ internal abstract class NineMangaParser(
         "it.niadd.com",
     )
 
-    @Broken
+    @Broken("Site responds but parser is broken or outdated")
     @MangaSourceParser("NINEMANGA_FR", "NineManga Français", "fr")
     class Francais(context: MangaLoaderContext) : NineMangaParser(
         context,
