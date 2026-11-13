@@ -552,6 +552,8 @@ internal abstract class MadaraParser(
 
 	protected open val selectDesc =
 		"div.description-summary div.summary__content, div.summary_content div.post-content_item > h5 + div, div.summary_content div.manga-excerpt, div.post-content div.manga-summary, div.post-content div.desc, div.c-page__content div.summary__content"
+	// The first heading of the page is not the title everywhere: see LekManga
+	protected open val selectTitle = "h1"
 	protected open val selectGenre = "div.genres-content a"
 	protected open val selectTestAsync = "div.listing-chapters_wrap"
 	protected open val selectState =
@@ -599,7 +601,7 @@ internal abstract class MadaraParser(
 		val alt = doc.body().select(selectAlt).firstOrNull()?.tableValue()?.textOrNull()
 
 		manga.copy(
-			title = doc.selectFirst("h1")?.textOrNull() ?: manga.title,
+			title = doc.selectFirst(selectTitle)?.textOrNull() ?: manga.title,
 			url = href,
 			publicUrl = href.toAbsoluteUrl(domain),
 			tags = doc.body().select(selectGenre).mapToSet { a -> createMangaTag(a) }.filterNotNull().toSet(),

@@ -29,12 +29,17 @@ import java.util.*
  * xComic (xcomic.me): a multi-language aggregator with a GraphQL API at `/query/`.
  *
  * A title groups several "sources" (comics): uploads of the work in one language each, by different
- * groups or sites. Chapters are shown in one branch per language. Within a language, the source with
- * the most chapters is used and the others only fill in the chapter numbers it lacks.
+ * groups or sites. Every upload is a branch of its own, as on the site's title page.
+ *
+ * A language source lists the titles and the uploads of its one language. [All] has every language,
+ * with a filter for it.
  */
-@MangaSourceParser("XCOMIC", "XComic")
-internal class XComic(context: MangaLoaderContext) :
-	PagedMangaParser(context, MangaParserSource.XCOMIC, pageSize = 36) {
+internal abstract class XComic(
+	context: MangaLoaderContext,
+	source: MangaParserSource,
+	/** The site's code for the one translation language this source has, or null for all of them. */
+	private val siteLang: String?,
+) : PagedMangaParser(context, source, pageSize = 36) {
 
 	override val configKeyDomain = ConfigKey.Domain("xcomic.me", "xcomic.net", "comik.to", "yona.to")
 
@@ -66,7 +71,9 @@ internal class XComic(context: MangaLoaderContext) :
 			isSearchWithFiltersSupported = true,
 			isYearSupported = true,
 			isYearRangeSupported = true,
-			isOriginalLocaleSupported = true,
+			// The app offers [MangaListFilterOptions.availableLocales] for both language filters, so a
+			// language source, which has no language to choose, goes without this one as well.
+			isOriginalLocaleSupported = siteLang == null,
 		)
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions = MangaListFilterOptions(
@@ -93,7 +100,7 @@ internal class XComic(context: MangaLoaderContext) :
 			Demographic.JOSEI,
 			Demographic.KODOMO,
 		),
-		availableLocales = LANGUAGES.mapToSet { it.toLocale() },
+		availableLocales = if (siteLang == null) LANGUAGES.mapToSet { it.toLocale() } else emptySet(),
 	)
 
 	// ============================== List ==============================
@@ -120,7 +127,7 @@ internal class XComic(context: MangaLoaderContext) :
 			put("excGenres", JSONArray(filter.tagsExclude.map { it.key }))
 			put("incGenresMode", "and")
 			put("excGenresMode", "or")
-			put("incTLangs", JSONArray(listOfNotNull(filter.locale?.toLangCode())))
+			put("incTLangs", JSONArray(listOfNotNull(siteLang ?: filter.locale?.toLangCode())))
 			put("incOLangs", JSONArray(listOfNotNull(filter.originalLocale?.toLangCode())))
 			put(
 				"origStatus",
@@ -267,69 +274,69 @@ internal class XComic(context: MangaLoaderContext) :
 		val editions = comicIds.distinct().map { id ->
 			async { semaphore.withPermit { fetchEdition(id) } }
 		}.awaitAll().filterNotNull()
+			.filter { siteLang == null || it.language == siteLang }
+			// The upload with the most chapters first; of two as long, the one updated last.
+			.sortedWith(compareByDescending<Edition> { it.chapterCount }.thenByDescending { it.lastPublic })
+		val branches = branchNames(editions)
 
-		// Per language: the source with the most chapters first, then the others that hold numbers it lacks.
-		val selected = editions.groupBy { languageName(it.language) }.mapValues { (_, list) ->
-			val covered = HashSet<Int>()
-			list.sortedWith(compareByDescending<Edition> { it.chapterCount }.thenByDescending { it.lastPublic })
-				.filterIndexed { index, edition ->
-					val numbers = edition.numbers()
-					(index == 0 || numbers.any { it !in covered }).also { keep ->
-						if (keep) covered.addAll(numbers)
-					}
-				}
-		}
-		val chapterLists = selected.values.flatten().map { edition ->
-			async { edition to semaphore.withPermit { fetchChapterList(edition.id) } }
-		}.awaitAll().toMap()
-
-		selected.map { (branch, list) ->
-			mergeChapters(branch, list.map { it to chapterLists[it].orEmpty() })
-		}.filter { it.isNotEmpty() }
-			// Branch starting at the lowest chapter first, so the whole list still reads oldest first.
+		editions.map { edition ->
+			async {
+				val items = semaphore.withPermit { fetchChapterList(edition.id) }
+				parseChapters(edition, branches.getValue(edition), items)
+			}
+		}.awaitAll().filter { it.isNotEmpty() }
+			// Upload starting at the lowest chapter first, so the whole list still reads oldest first.
 			.sortedBy { branch -> branch.minOfOrNull { ch -> ch.number.takeIf { it > 0f } ?: Float.MAX_VALUE } }
 			.flatten()
 			.distinctBy { it.id }
 	}
 
-	private fun mergeChapters(branch: String, sources: List<Pair<Edition, List<JSONObject>>>): List<MangaChapter> {
-		val keys = HashSet<Pair<Int, Float>>()
-		val numbers = HashSet<Float>()
-		val result = ArrayList<MangaChapter>()
-		for ((index, pair) in sources.withIndex()) {
-			val (edition, items) = pair
-			val primary = index == 0
-			for (jo in items) {
-				val id = jo.getStringOrNull("id") ?: continue
-				val number = (jo.getFloatOrNull("chaNum") ?: jo.getFloatOrNull("serial"))?.takeIf { it > 0f } ?: 0f
-				val volume = jo.getFloatOrNull("volNum")?.toInt()?.coerceAtLeast(0) ?: 0
-				if (number > 0f) {
-					if (primary) {
-						if (!keys.add(volume to number)) continue
-					} else {
-						if (number in numbers || !keys.add(volume to number)) continue
-					}
-					numbers.add(number)
-				} else if (!primary) {
-					continue
-				}
-				val url = "/chapter/$id"
-				result += MangaChapter(
-					id = uid(id, url),
-					title = chapterTitle(jo, number),
-					number = number,
-					volume = volume,
-					url = url,
-					scanlator = edition.label,
-					uploadDate = jo.getLongOrDefault("datePublic", 0L).takeIf { it > 0L }
-						?: jo.getLongOrDefault("dateCreate", 0L),
-					branch = branch,
-					source = source,
-				)
+	/**
+	 * A branch per upload, named as the site's title page names it: by the upload's name, or by its code when
+	 * it has none. With every language in one list the language comes first, which is also what the app
+	 * finds the reader's own language by; a language's only upload, if unnamed, is just the language.
+	 */
+	private fun branchNames(editions: List<Edition>): Map<Edition, String> {
+		val uses = editions.groupingBy { it.language to it.label }.eachCount()
+		val perLanguage = editions.groupingBy { it.language }.eachCount()
+		return editions.associateWith { edition ->
+			val name = when {
+				edition.label == null -> edition.code
+				// Two uploads of one name would otherwise share a branch, each with its own chapter 1.
+				uses.getValue(edition.language to edition.label) > 1 -> "${edition.label} ${edition.code}"
+				else -> edition.label
+			}
+			when {
+				siteLang != null -> name
+				edition.label == null && perLanguage[edition.language] == 1 -> languageName(edition.language)
+				else -> "${languageName(edition.language)} ($name)"
 			}
 		}
-		val resetsOnNewVolume = sources.firstOrNull()?.first?.resetsOnNewVolume == true
-		return if (resetsOnNewVolume) {
+	}
+
+	private fun parseChapters(edition: Edition, branch: String, items: List<JSONObject>): List<MangaChapter> {
+		val keys = HashSet<Pair<Int, Float>>()
+		val result = ArrayList<MangaChapter>(items.size)
+		for (jo in items) {
+			val id = jo.getStringOrNull("id") ?: continue
+			val number = (jo.getFloatOrNull("chaNum") ?: jo.getFloatOrNull("serial"))?.takeIf { it > 0f } ?: 0f
+			val volume = jo.getFloatOrNull("volNum")?.toInt()?.coerceAtLeast(0) ?: 0
+			if (number > 0f && !keys.add(volume to number)) continue
+			val url = "/chapter/$id"
+			result += MangaChapter(
+				id = uid(id, url),
+				title = chapterTitle(jo, number),
+				number = number,
+				volume = volume,
+				url = url,
+				scanlator = edition.label,
+				uploadDate = jo.getLongOrDefault("datePublic", 0L).takeIf { it > 0L }
+					?: jo.getLongOrDefault("dateCreate", 0L),
+				branch = branch,
+				source = source,
+			)
+		}
+		return if (edition.resetsOnNewVolume) {
 			result.sortedWith(compareBy<MangaChapter> { it.volume }.thenBy { it.number })
 		} else {
 			result.sortedWith(compareBy<MangaChapter> { it.number }.thenBy { it.volume })
@@ -367,11 +374,6 @@ internal class XComic(context: MangaLoaderContext) :
 			lastPublic = node.optJSONObject("chapterNode_up_to")?.optJSONObject("data")
 				?.getLongOrDefault("datePublic", 0L) ?: 0L,
 			resetsOnNewVolume = node.optBoolean("is_chaNumResetOnNewVol", false),
-			ranges = node.optJSONArray("chaNums_range")?.mapJSONNotNull { range ->
-				val from = range.optInt("from", -1)
-				val to = range.optInt("to", -1)
-				if (from in 0..to) from..to else null
-			}.orEmpty(),
 		)
 	}
 
@@ -437,7 +439,8 @@ internal class XComic(context: MangaLoaderContext) :
 			authors = emptySet(),
 			source = source,
 		)
-		return getDetails(stub)
+		// A title link names no language: a language source leaves a title it has no upload of to the others.
+		return getDetails(stub).takeUnless { siteLang != null && it.chapters.isNullOrEmpty() }
 	}
 
 	// ============================== Helpers ==============================
@@ -476,17 +479,10 @@ internal class XComic(context: MangaLoaderContext) :
 		val chapterCount: Int,
 		val lastPublic: Long,
 		val resetsOnNewVolume: Boolean,
-		val ranges: List<IntRange>,
 	) {
 
-		fun numbers(): Set<Int> {
-			val result = HashSet<Int>()
-			for (range in ranges) {
-				if (result.size + (range.last - range.first) > MAX_RANGE_NUMBERS) break
-				result.addAll(range)
-			}
-			return result
-		}
+		/** What the site's title page shows for an upload: `#KPOLQK`. */
+		val code: String get() = "#" + id.uppercase(Locale.ROOT)
 	}
 
 	private fun languageName(code: String?): String {
@@ -527,7 +523,6 @@ internal class XComic(context: MangaLoaderContext) :
 		const val MAX_CONCURRENT_REQUESTS = 6
 		const val CHAPTER_PAGE_SIZE = 1000
 		const val MAX_CHAPTER_PAGES = 20
-		const val MAX_RANGE_NUMBERS = 20_000
 		const val MAX_PAGES = 10_000L
 
 		val whitespaceRegex = Regex("\\s+")
@@ -586,7 +581,6 @@ internal class XComic(context: MangaLoaderContext) :
 						translatedLanguage
 						chaps_normal
 						is_chaNumResetOnNewVol
-						chaNums_range { from to }
 						chapterNode_up_to { data { datePublic } }
 					}
 				}
@@ -784,4 +778,93 @@ internal class XComic(context: MangaLoaderContext) :
 
 		val TAGS_MAP = TAGS.toMap()
 	}
+
+	// The sources. [All] is the one this parser began as and keeps its name, which readers' libraries are
+	// kept under. It stays first: a title link is offered to the sources in this order, and it takes any.
+	// A language has a source of its own once the site has some 180 titles in it; the rest are in [All].
+
+	@MangaSourceParser("XCOMIC", "XComic")
+	class All(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC, null)
+
+	@MangaSourceParser("XCOMIC_EN", "XComic (English)", "en")
+	class English(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_EN, "en")
+
+	@MangaSourceParser("XCOMIC_FR", "XComic (French)", "fr")
+	class French(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_FR, "fr")
+
+	@MangaSourceParser("XCOMIC_ES", "XComic (Spanish)", "es")
+	class Spanish(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_ES, "es")
+
+	@MangaSourceParser("XCOMIC_ES_419", "XComic (Spanish, Latin America)", "es")
+	class SpanishLatinAmerica(context: MangaLoaderContext) :
+		XComic(context, MangaParserSource.XCOMIC_ES_419, "es_419")
+
+	@MangaSourceParser("XCOMIC_PT", "XComic (Portuguese)", "pt")
+	class Portuguese(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_PT, "pt")
+
+	@MangaSourceParser("XCOMIC_PT_BR", "XComic (Portuguese, Brazil)", "pt")
+	class PortugueseBrazil(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_PT_BR, "pt_br")
+
+	@MangaSourceParser("XCOMIC_JA", "XComic (Japanese)", "ja")
+	class Japanese(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_JA, "ja")
+
+	@MangaSourceParser("XCOMIC_KO", "XComic (Korean)", "ko")
+	class Korean(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_KO, "ko")
+
+	@MangaSourceParser("XCOMIC_ZH", "XComic (Chinese)", "zh")
+	class Chinese(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_ZH, "zh")
+
+	@MangaSourceParser("XCOMIC_ZH_HK", "XComic (Chinese, Hong Kong)", "zh")
+	class ChineseHongKong(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_ZH_HK, "zh_hk")
+
+	@MangaSourceParser("XCOMIC_RU", "XComic (Russian)", "ru")
+	class Russian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_RU, "ru")
+
+	@MangaSourceParser("XCOMIC_ID", "XComic (Indonesian)", "id")
+	class Indonesian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_ID, "id")
+
+	@MangaSourceParser("XCOMIC_VI", "XComic (Vietnamese)", "vi")
+	class Vietnamese(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_VI, "vi")
+
+	@MangaSourceParser("XCOMIC_IT", "XComic (Italian)", "it")
+	class Italian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_IT, "it")
+
+	@MangaSourceParser("XCOMIC_PL", "XComic (Polish)", "pl")
+	class Polish(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_PL, "pl")
+
+	@MangaSourceParser("XCOMIC_TR", "XComic (Turkish)", "tr")
+	class Turkish(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_TR, "tr")
+
+	@MangaSourceParser("XCOMIC_DE", "XComic (German)", "de")
+	class German(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_DE, "de")
+
+	@MangaSourceParser("XCOMIC_TH", "XComic (Thai)", "th")
+	class Thai(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_TH, "th")
+
+	@MangaSourceParser("XCOMIC_UK", "XComic (Ukrainian)", "uk")
+	class Ukrainian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_UK, "uk")
+
+	@MangaSourceParser("XCOMIC_HU", "XComic (Hungarian)", "hu")
+	class Hungarian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_HU, "hu")
+
+	@MangaSourceParser("XCOMIC_AR", "XComic (Arabic)", "ar")
+	class Arabic(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_AR, "ar")
+
+	@MangaSourceParser("XCOMIC_FA", "XComic (Persian)", "fa")
+	class Persian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_FA, "fa")
+
+	@MangaSourceParser("XCOMIC_CS", "XComic (Czech)", "cs")
+	class Czech(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_CS, "cs")
+
+	@MangaSourceParser("XCOMIC_MN", "XComic (Mongolian)", "mn")
+	class Mongolian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_MN, "mn")
+
+	@MangaSourceParser("XCOMIC_BG", "XComic (Bulgarian)", "bg")
+	class Bulgarian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_BG, "bg")
+
+	@MangaSourceParser("XCOMIC_RO", "XComic (Romanian)", "ro")
+	class Romanian(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_RO, "ro")
+
+	@MangaSourceParser("XCOMIC_CA", "XComic (Catalan)", "ca")
+	class Catalan(context: MangaLoaderContext) : XComic(context, MangaParserSource.XCOMIC_CA, "ca")
 }
