@@ -50,10 +50,12 @@ jobs:
   # Has no secrets and can publish nothing: making a parser for every source runs code of each of them, which
   # is never done in the job that signs. No site is visited.
   #
-  # Not in a fork: it has neither the key nor anything to publish to, and every push to its master would
-  # otherwise end in a failed run. The jobs below need this one, so they are left out with it.
+  # Only in this repository: a copy of it has neither the key nor anything to publish to, and every push to its
+  # master would otherwise end in a failed run. The jobs below need this one, so they are left out with it.
+  # Told by name, not by asking whether this is a fork: this repository is itself a fork, of the parsers it
+  # started from, and asking that left every run out here too. A renamed repository has to be renamed here.
   check:
-    if: github.ref == 'refs/heads/master' && !github.event.repository.fork
+    if: github.ref == 'refs/heads/master' && github.repository == 'Kotatsu-Redo/kotatsu-parsers-redo'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
