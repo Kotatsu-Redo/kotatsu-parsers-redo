@@ -102,7 +102,13 @@ In the repository settings on GitHub:
 
 - Auto-merge that a maintainer turned on is turned off by GitHub when somebody without write access pushes to
   the pull request again: the new commits have not been read.
+- **It is not turned off when somebody with write access pushes again.** What they add is merged with the
+  rest, and counts as merged by whoever turned auto-merge on. If that was the owner, it is published with
+  nobody asked and nobody having read it. For a pull request by somebody with write access, turn auto-merge
+  on only once it is final, or turn it off and on again after reading what was added. The ruleset option
+  *Require approval of the most recent reviewable push* closes this, at the price of an approval on every
+  pull request.
 - Merging is publishing. A merge that changes the parsers starts **Publish parsers bundle** by itself, and that
-  run tests nothing against the sites: what is on `master` goes out as it is, within minutes. When GitHub
-  names the owner as the one who merged, nobody else is asked. For any other name, a bot's included, the run
-  waits for a reviewer first.
+  run tests nothing against the sites: all of `master` goes out as it is. When GitHub names the owner as the
+  one who merged, nobody else is asked and it is out within minutes. For any other name, a bot's included,
+  the run waits for a reviewer first.

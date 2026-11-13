@@ -9,14 +9,15 @@ This is how a fix merged here gets to people in minutes instead of with the next
 
 ## Publishing
 
-**Publish parsers bundle** runs by itself after every commit on `master` that changes what the parsers are made
-of: the parsers, the contract, or the build. A commit that only touches documents or workflows starts nothing.
-It can also be run by hand from the Actions tab, on `master`, with nothing to fill in.
+**Publish parsers bundle** starts by itself when a commit lands on `master` that changes what the parsers are
+made of: the parsers, the contract and its record, or the build. A commit that only touches documents or
+workflows starts nothing, and neither does one whose message has `[skip ci]` in it. It can also be started by
+hand from the Actions tab, on `master`, with nothing to fill in.
 
-When the commit was pushed or merged by the owner (the one account named in the workflow), or the run was
-started by them, it goes straight through. For anyone else it waits for a reviewer to approve it from the page
-of the run ("Review deployments"): see [Who is asked to confirm](#who-is-asked-to-confirm). Either way it does
-two things:
+When GitHub names the owner (the one account named in the workflow) as the one who pushed, merged or started
+it, it goes straight through. For anyone else it waits for a reviewer to approve it from the page of the run
+("Review deployments"): see [Who is asked to confirm](#who-is-asked-to-confirm). Either way it does two
+things:
 
 1. **Checks what is on `master`.** Every source has to have its parser, and the parsers have to fit the apps
    they are meant for (see [The checks](#the-checks)). No site is visited.
@@ -37,8 +38,17 @@ pushes it, or not at all.
 A run started by hand publishes whatever is on `master`, also when no parser changed since the last
 publication: every app then downloads the same parsers once more. Do that when there is something to send.
 
-When several commits land one after another, each starts a run, and only the one of the newest commit
-publishes: the others find that `master` has moved on and stop.
+Runs go one at a time. While one is running, or waiting for its confirmation, only the newest of the later
+ones is kept waiting; the ones in between are dropped, as what the newest publishes contains theirs. A run
+that gets to publishing after the parsers on `master` have changed again stops there, and leaves it to the run
+of the newer commit.
+
+Two things follow that are easy to miss:
+
+- **A run publishes all of `master`, not one commit.** When the owner pushes, what goes out includes what
+  others merged before and nobody has approved yet.
+- **A run waiting for its confirmation holds the later ones up.** Approve it or reject it; the newest of the
+  runs behind it then goes on.
 
 ### When it does not go as planned
 
@@ -53,13 +63,15 @@ publishes: the others find that `master` has moved on and stop.
   that for a yes.
 - **Somebody else started a run again and it did nothing:** only the first attempt of their run can be
   approved. They start a new run.
-- **"master has moved on since this run was started":** the run was of a commit that is no longer the head of
-  `master`: something was pushed or merged while it ran, while it waited, or before it was started again.
-  Start a new run.
+- **"The parsers on master are no longer the ones of this run":** something that goes into the parsers was
+  pushed, merged or reverted while the run was running, waiting, or before it was started again. The commit
+  that did it has a run of its own. If that one published nothing either, start a run by hand.
+- **A commit changed the parsers and no run started:** its message has `[skip ci]` or the like in it, which
+  GitHub obeys for every workflow. Start a run by hand.
 - **Only the last step fails**, the one that removes older files: the publication is out. Starting the run again
   is refused, as what is published is already as new, and is not needed.
-- **An old run is started again:** it publishes nothing if `master` has moved on since, or if something as new
-  is already out. An older build cannot be put over a newer one.
+- **An old run is started again:** it publishes nothing if the parsers on `master` have changed since, or if
+  something as new is already out. An older build cannot be put over a newer one.
 - **The run was started on another branch:** it does nothing. Only `master` is published.
 
 ### Who is asked to confirm
@@ -99,8 +111,8 @@ using the app.** The key is the `PARSERS_SIGNING_KEY` secret of a GitHub environ
 environment can only be used by runs on `master`. A workflow on any other branch is refused it, whatever the
 workflow says. It must not also be a secret of the repository: every branch can read those.
 
-So what gets signed is what is on `master` when the run is started, and only if it is still there when the
-run gets to building it. Keep the list
+So what gets signed is what is on `master` when the run is started, and only if the parsers there are still
+the same when the run gets to building them. Keep the list
 of people who can push to `master` or change the repository's settings as short as the list of people who can
 release the app.
 

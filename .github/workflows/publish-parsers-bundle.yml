@@ -12,12 +12,14 @@ on:
   push:
     branches:
       - master
-    # What goes into the parsers, the same list the pull request tests go by (SelectParserTestsTask). A
-    # commit that touches none of it, the documents or a workflow say, would only make every app download
-    # the same parsers again
+    # What goes into the parsers: the list the pull request tests go by (SelectParserTestsTask), and the
+    # record of the contract, which the checks here read. A commit that touches none of it, the documents or
+    # a workflow say, would only make every app download the same parsers again. The same list is in the
+    # step "Make sure these are still the parsers on master" below: change both together
     paths:
       - 'src/main/**'
       - 'src/contract/**'
+      - 'api/**'
       - 'kotatsu-parsers-ksp/**'
       - 'buildSrc/**'
       - 'gradle/**'
@@ -29,6 +31,13 @@ on:
 permissions:
   contents: read
 
+# One run at a time, in the order the commits came. While one runs, or waits for its confirmation, only the
+# newest of the later ones is kept waiting and the ones in between are dropped: what the newest publishes
+# contains theirs. Nothing running is ever cut off in the middle of publishing.
+concurrency:
+  group: parsers-bundle
+  cancel-in-progress: false
+
 defaults:
   run:
     # Said outright: only then does a step stop when a command in the middle of a pipe fails
@@ -39,9 +48,12 @@ env:
 
 jobs:
   # Has no secrets and can publish nothing: making a parser for every source runs code of each of them, which
-  # is never done in the job that signs. No site is visited
+  # is never done in the job that signs. No site is visited.
+  #
+  # Not in a fork: it has neither the key nor anything to publish to, and every push to its master would
+  # otherwise end in a failed run. The jobs below need this one, so they are left out with it.
   check:
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' && !github.event.repository.fork
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -114,10 +126,6 @@ jobs:
     environment: PARSERS_SIGNING_KEY
     permissions:
       contents: write
-    # One at a time: two of these would race for the same release assets
-    concurrency:
-      group: parsers-bundle-publish
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -128,14 +136,18 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # A run publishes the commit it was started on, and can sit waiting for its confirmation, or be started
-      # again, long after. If master has moved on since, a revert say, what would go out is no longer what is
-      # on master: nothing is published, and a new run is started instead
-      - name: Make sure this is still what is on master
+      # A run publishes the commit it was started on, and can get here long after: it waited for its
+      # confirmation, or behind another run, or was started again. If what the parsers are made of is no longer
+      # the same on master, a newer commit or a revert, nothing is published here: a commit that changed it
+      # has a run of its own. A later commit that only touches something else, a document say, changes nothing
+      # of what goes out and does not stand in the way. The list is the one of `on.push.paths` above
+      - name: Make sure these are still the parsers on master
         run: |
-          head=$(git ls-remote origin refs/heads/master | cut -f1)
-          if [ "$head" != "$GITHUB_SHA" ]; then
-            echo "::error::master has moved on since this run was started: it is at ${head:-nothing that could be read}, and this run is of $GITHUB_SHA. Nothing is published. Start a new run."
+          git fetch --quiet --no-tags --depth=1 origin refs/heads/master
+          if ! git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- \
+              src/main src/contract api kotatsu-parsers-ksp buildSrc gradle \
+              build.gradle.kts settings.gradle.kts gradle.properties; then
+            echo "::error::The parsers on master are no longer the ones of this run: master is at $(git rev-parse FETCH_HEAD), this run is of $GITHUB_SHA, and what goes into the parsers differs between the two. Nothing is published here. If no newer run is publishing them, start one from the Actions tab."
             exit 1
           fi
 
