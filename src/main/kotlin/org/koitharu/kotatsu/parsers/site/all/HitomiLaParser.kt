@@ -659,9 +659,18 @@ internal class HitomiLaParser(context: MangaLoaderContext) : AbstractMangaParser
 			val imageId = imageIdFromHash(hash)
 			val subDomain = subdomainOffset(imageId) + 1
 			val thumbSubdomain = 'a' + subdomainOffset(imageId)
+			// What was a GIF is served moving, as an AVIF and as a WebP. The app plays a WebP that moves on any
+			// phone since Android 9, an AVIF only since Android 12 and only in versions after 9.8.7, so these pages
+			// are asked for as WebP, which is what the site's own reader falls back on. They are a few times larger
+			// that way. Every other page stays an AVIF.
+			val wasGif = image.optString("name").endsWith(".gif", ignoreCase = true)
 			MangaPage(
 				id = generateUid(hash),
-				url = "https://a${subDomain}.$cdnDomain/$commonId$imageId/$hash.avif",
+				url = if (wasGif) {
+					"https://w${subDomain}.$cdnDomain/$commonId$imageId/$hash.webp"
+				} else {
+					"https://a${subDomain}.$cdnDomain/$commonId$imageId/$hash.avif"
+				},
 				preview = "https://${thumbSubdomain}tn.$cdnDomain/webpsmallsmalltn/${thumbPathFromHash(hash)}/$hash.webp",
 				source = source,
 			)
