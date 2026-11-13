@@ -138,7 +138,7 @@ internal class ChapterAlignmentHarvest {
 			MangaParserSource.MANGAPARK,
 			MangaParserSource.WEEBCENTRAL,
 			MangaParserSource.MANGAREADERTO,
-			MangaParserSource.MANGABUDDY,
+			MangaParserSource.COMIZYIO,
 			MangaParserSource.MANGAKAKALOT,
 		)
 
