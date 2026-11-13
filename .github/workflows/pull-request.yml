@@ -1,7 +1,8 @@
 name: Pull request
 
-# For every pull request to master: the sources it changes are tested against their sites, and the parsers are
-# checked for still fitting the apps already installed. These are the checks master requires: once a maintainer
+# The one workflow that tests parsers. For every pull request to master: the sources it changes are tested
+# against their sites, and the parsers are checked for still fitting the apps already installed. Publishing
+# tests nothing against the sites again. These are the checks master requires: once a maintainer
 # has read a pull request and told GitHub to merge it when they pass, it is merged the moment they do. See
 # docs/PULL_REQUESTS.md.
 #

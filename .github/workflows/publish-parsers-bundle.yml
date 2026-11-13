@@ -3,26 +3,11 @@ name: Publish parsers bundle
 # Makes the parsers of master available to the apps already installed, which take them in by themselves:
 # when they are next opened, when a manga is opened, or as soon as a source fails. Nobody is asked or told.
 #
-# Run by hand, from the Actions tab. The sources whose code changed since the last publication are tested
-# against their sites first. When they all pass, the parsers go out at once. When any of them fails, is kept
-# from being tested by Cloudflare, or a change could not be tested at all, the run waits for somebody to look
-# at the results and confirm: see docs/BUNDLE.md.
+# Run by hand, from the Actions tab, and it goes straight through: the parsers are built, checked for fitting
+# the apps they are meant for, signed and uploaded. Nothing is tested against the sites here. That is done for
+# every pull request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
 on:
   workflow_dispatch:
-    inputs:
-      since:
-        description: >-
-          Commit to compare with when choosing the sources to test, further back than the last publication.
-          Leave empty to compare with the last publication. Needed the first time, when there is none:
-          the commit of the parsers inside the released app.
-        required: false
-        type: string
-      skip_tests:
-        description: >-
-          Publish without testing anything. The run then always waits for confirmation.
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -36,18 +21,15 @@ env:
   RELEASE_TAG: parsers-bundle
 
 jobs:
-  # Has no secrets and can publish nothing: it runs whatever the parsers do against sites it does not control
-  test:
+  # Has no secrets and can publish nothing: making a parser for every source runs code of each of them, which
+  # is never done in the job that signs. No site is visited
+  check:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    outputs:
-      verdict: ${{ steps.summary.outputs.verdict }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # All of the history: the sources to test are the ones changed since an earlier commit
-          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -55,101 +37,22 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # Reads the cache of earlier builds and leaves nothing in it for the job that signs
+      # Fills the cache the pull request checks read from and cannot write to: what runs here is what is on
+      # master, and nothing of a pull request. The job that signs uses no cache at all
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
-        with:
-          cache-read-only: true
 
-      # Makes a parser for every source, which runs code of each of them. Here, where there is nothing to take, and
-      # never in the job that signs. Always, whatever was asked about the tests against the sites
       - name: Check that every source has its parser
         run: ./gradlew test --tests '*ParsersBundleTest'
 
-      - name: Choose the sources to test
-        id: select
-        if: ${{ !inputs.skip_tests }}
-        env:
-          SINCE: ${{ inputs.since }}
-        run: |
-          ./gradlew selectParserTests ${SINCE:+"-Psince=$SINCE"}
-          echo "sources=$(cat build/parsersTests/sources.txt)" >> "$GITHUB_OUTPUT"
-
-      # A failing test does not fail this step: what the failures amount to is decided in the next one
-      - name: Test them against their sites
-        if: ${{ !inputs.skip_tests && steps.select.outputs.sources != '' }}
-        env:
-          SOURCES: ${{ steps.select.outputs.sources }}
-        run: ./gradlew test --tests 'org.koitharu.kotatsu.parsers.MangaParserTest' "-PtestSources=$SOURCES"
-
-      - name: Sum up
-        id: summary
-        env:
-          SKIP_TESTS: ${{ inputs.skip_tests }}
-        run: |
-          if [ "$SKIP_TESTS" = "true" ]; then
-            {
-              echo "# Parser tests"
-              echo
-              echo "Skipped, as asked when this run was started. Nothing was tested, so a person has to confirm before the parsers are published."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "verdict=review" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          ./gradlew summarizeParserTests
-          cat build/parsersTests/summary.md >> "$GITHUB_STEP_SUMMARY"
-          echo "verdict=$(cat build/parsersTests/verdict.txt)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: parser-test-results
-          path: |
-            build/parsersTests
-            build/test-results/test
-          if-no-files-found: ignore
-          overwrite: true
-
-  # Only when something did not pass or could not be tested. The environment is what makes the run wait: it
-  # has required reviewers, and nothing here goes on until one of them has approved it from the page of the run.
-  confirm:
-    needs: test
-    if: needs.test.outputs.verdict == 'review'
-    runs-on: ubuntu-latest
-    environment: parsers-bundle-review
-    permissions:
-      actions: read
-    steps:
-      # An environment that was never given reviewers lets everything through without asking anyone.
-      # So the approval itself is looked for, and anything but finding one stops the run.
-      - name: Make sure somebody confirmed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
-            --jq '[.[] | select(.state == "approved") | select(any(.environments[]; .name == "parsers-bundle-review"))] | length')
-          if [ "$approvals" -ge 1 ] 2> /dev/null; then
-            echo "Confirmed by a reviewer."
-          else
-            echo "::error::No approval of this run was found for the parsers-bundle-review environment. Give that environment required reviewers (Settings > Environments), then run this again."
-            exit 1
-          fi
-
-  # Either everything that changed was tested and passed, and nobody had to be asked, or somebody was asked
-  # and said yes. Anything else, a verdict that is missing included, publishes nothing.
+  # Only what is on master, and only once the check above has passed: when that job fails, or is left out for
+  # the run being on another branch, this one is left out too and nothing is published.
   publish:
-    needs: [test, confirm]
-    if: >-
-      ${{
-        !cancelled() && needs.test.result == 'success' && (
-          (needs.test.outputs.verdict == 'passed' && needs.confirm.result == 'skipped') ||
-          (needs.test.outputs.verdict == 'review' && needs.confirm.result == 'success')
-        )
-      }}
+    needs: check
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # One at a time: two of these would race for the same release assets. Only this job is held back, so a run
-    # that waits days for its confirmation does not keep a later one, a revert say, from going out first.
+    # One at a time: two of these would race for the same release assets
     concurrency:
       group: parsers-bundle-publish
       cancel-in-progress: false
@@ -169,7 +72,7 @@ jobs:
           cache-disabled: true
 
       # Fails, and publishes nothing, if the parsers no longer fit the apps they are meant for, or if what is
-      # published is already as new: a run confirmed late, or started again, is not put over a later one.
+      # published is already as new: an old run started again is not put over a later one.
       # The parsers are compiled and packed here and nothing of them is run: the key is in this job
       - name: Build and check
         run: ./gradlew checkNewerThanPublished parsersBundleZip

@@ -18,15 +18,16 @@ private const val TRIGGER_LIMIT = 5
 private val COMMIT_NAME = Regex("[0-9A-Za-z._/~^-]{1,200}")
 
 /**
- * Decides which sources the live tests are run for before parsers are published: the ones whose code is not the code
- * of the last publication. See docs/BUNDLE.md for where the publication comes from.
+ * Decides which sources the live tests are run for: the ones a pull request changes ([comparedWith]) or, when that
+ * is not given, the ones whose code is not the code of the last publication. See docs/PULL_REQUESTS.md. Publishing
+ * itself tests nothing against the sites.
  *
  * The sites are slow and some of them block automated visitors, so every source is not tested every time. A source
  * that changed itself is always tested. Those that only build on changed code (a base class, a helper, the core) are
  * tested by a sample: if the shared code is broken, a few of them show it as well as all of them would.
  *
  * What goes into the parsers and is not vouched for by any tested source is counted as untested, and a person is asked
- * to look at it: it must never be published on the strength of tests that did not touch it.
+ * to look at it: it must never be merged on the strength of tests that did not touch it.
  */
 abstract class SelectParserTestsTask : DefaultTask() {
 
@@ -176,7 +177,7 @@ abstract class SelectParserTestsTask : DefaultTask() {
 	private fun chooseBase(directory: File): Pair<String, String> {
 		val sinceValue = since.orNull?.takeIf { it.isNotBlank() }
 		if (sinceValue != null && (sinceValue.startsWith("-") || !COMMIT_NAME.matches(sinceValue))) {
-			// It is typed into a form and handed to git: a name of a commit, and never something git reads as an option
+			// It is typed by hand and handed to git: a name of a commit, and never something git reads as an option
 			throw GradleException("`$sinceValue` does not look like a commit: give `since` a commit hash, a tag or a branch")
 		}
 		fun resolve(name: String, what: String) = git(directory, "rev-parse", "--verify", "$name^{commit}")

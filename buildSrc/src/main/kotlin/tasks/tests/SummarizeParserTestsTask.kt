@@ -16,7 +16,7 @@ private const val MAX_FAILURES_SHOWN = 8
 
 /**
  * Reads how the live tests of the sources selectParserTests chose went, and says whether a person has to look at it
- * before the parsers are published.
+ * before the change is merged.
  *
  * It never fails because tests failed: that is what it reports. A failure caused by Cloudflare is told apart because
  * it says something about the site and about where the tests run, and nothing about the code.
@@ -84,9 +84,9 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 			appendLine(
 				when {
 					nothingChanged -> "Nothing that goes into the parsers changed, so there was nothing to test."
-					verdict == "passed" && rows.isEmpty() -> "No source needed testing, so the parsers can be published."
-					verdict == "passed" && rows.size == 1 -> "The one tested source passed, so the parsers can be published."
-					verdict == "passed" -> "All ${rows.size} tested sources passed, so the parsers can be published."
+					verdict == "passed" && rows.isEmpty() -> "No source needed testing."
+					verdict == "passed" && rows.size == 1 -> "The one tested source passed."
+					verdict == "passed" -> "All ${rows.size} tested sources passed."
 					else -> {
 						val reasons = ArrayList<String>()
 						if (notPassed.isNotEmpty()) {
@@ -97,7 +97,7 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 						if (untested > 0) {
 							reasons += if (untested == 1) "1 change could not be tested" else "$untested changes could not be tested"
 						}
-						"${reasons.joinToString(" and ")}, so a person has to confirm before the parsers are published."
+						"${reasons.joinToString(" and ")}, so a person has to look at it."
 					}
 				},
 			)

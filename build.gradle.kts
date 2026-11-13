@@ -330,7 +330,7 @@ tasks.register<GenerateSigningKeyTask>("generateParsersSigningKey") {
     keyFile.set(providers.gradleProperty("keyFile"))
 }
 
-// ---- Live tests of the sources that changed since the last publication: see docs/BUNDLE.md ----
+// ---- Live tests of the sources a pull request changes: see docs/PULL_REQUESTS.md ----
 
 val parsersTestsDir = layout.buildDirectory.dir("parsersTests")
 
@@ -342,9 +342,9 @@ val parsersBundleUrl: Provider<String> = providers.gradleProperty("parsersBundle
 
 tasks.register<SelectParserTestsTask>("selectParserTests") {
     group = "verification"
-    description = "Chooses the sources to run the live tests for, from what changed since the last publication. " +
-        "-Psince=<commit> can only reach further back than that. -PcomparedWith=<commit> compares with that commit " +
-        "and looks for no publication: for a pull request."
+    description = "Chooses the sources to run the live tests for. -PcomparedWith=<commit> compares with that commit: " +
+        "for a pull request. Without it the comparison is with the last publication, and -Psince=<commit> can only " +
+        "reach further back than that."
     dependsOn("kspKotlin")
     since.set(providers.gradleProperty("since"))
     comparedWith.set(providers.gradleProperty("comparedWith"))
@@ -361,7 +361,7 @@ tasks.register<SelectParserTestsTask>("selectParserTests") {
 
 tasks.register<SummarizeParserTestsTask>("summarizeParserTests") {
     group = "verification"
-    description = "Says how the live tests of the selected sources went, and whether a person has to confirm."
+    description = "Says how the live tests of the selected sources went, and whether a person has to look."
     testsDir.set(parsersTestsDir)
     resultsDir.set(
         layout.projectDirectory.dir(providers.gradleProperty("testResultsDir"))

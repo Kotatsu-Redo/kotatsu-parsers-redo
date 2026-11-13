@@ -9,17 +9,12 @@ This is how a fix merged here gets to people in minutes instead of with the next
 
 ## Publishing
 
-Run **Publish parsers bundle** from the Actions tab, on `master`. It does three things in a row:
+Run **Publish parsers bundle** from the Actions tab, on `master`. There is nothing to fill in and nobody to
+confirm: it goes straight through, in two steps.
 
-1. **Tests the sources that changed.** Only those whose code differs from the last publication are run against
-   their sites, with `MangaParserTest`. The results are on the page of the run.
-2. **Asks for confirmation unless everything that changed was tested and passed.** A failed test and a site that
-   Cloudflare kept the tests away from both count: the first may be a broken parser, the second could not be
-   checked at all. So does a change no test could vouch for, such as a removed source. The run then waits, and
-   you approve or reject it from its page ("Review deployments"). Otherwise nobody is asked and it goes
-   straight on.
-3. **Builds, signs and uploads.** It checks that the parsers fit the apps they are meant for, signs them, and
-   uploads two files to the `parsers-bundle` release:
+1. **Checks what is on `master`.** Every source has to have its parser, and the parsers have to fit the apps
+   they are meant for (see [The checks](#the-checks)). No site is visited.
+2. **Signs and uploads** two files to the `parsers-bundle` release:
 
 | File | What it is |
 |---|---|
@@ -28,57 +23,24 @@ Run **Publish parsers bundle** from the Actions tab, on `master`. It does three 
 
 Apps read the manifest, and download the zip only if it is newer than what they have.
 
-Every installed app that sees a publication takes it, with no step in between and nobody watching. The tests
-are there to catch what can be caught by a machine. They do not replace knowing that what was merged works.
+Every installed app that sees a publication takes it, with no step in between and nobody watching. **Nothing is
+tested against the sites when publishing.** That is done for every pull request, before it is merged: see
+[PULL_REQUESTS.md](PULL_REQUESTS.md). What is pushed to `master` without a pull request is tested by whoever
+pushes it, or not at all.
 
-### Which sources are tested
-
-- A source whose own file changed since the last publication is always tested.
-- For each changed file that several sources share, 10 of the sources that build on it are tested: a base class
-  such as `MadaraParser` (its subclasses), or a helper in a site folder (the sources of that folder, and those
-  whose base class is in it). Testing all of them would mean hundreds of sites for one changed line.
-- When anything that every source goes through changed, `core`, `util`, the contract, the build itself, 30
-  sources taken from all of them are tested as well.
-- The samples are picked by the commit, so running again tests the same ones.
-- Sources marked `@Broken` are left out.
-- A change that leaves nothing to test, a deleted source or one that is only in broken sources, is listed as
-  untested and makes the run ask for confirmation.
-- If nothing that goes into the parsers changed, nothing is tested and nothing is published.
-
-What a source "builds on" is its own file and the files of its base classes. A change in one source's file that
-another source happens to use is tested through the first one only.
-
-"The last publication" is read from the manifest in the release. The first time there is none: give the run the
-commit the parsers inside the released app were built from, in its `since` field (it is the `parsers = "..."` of
-the app's `gradle/libs.versions.toml`). Later on the field can only reach further back than the last
-publication, to test more. A commit after it is refused: what goes out contains everything since the last
-publication, so all of that has to be looked at.
-
-To see what a run would test without running it:
-
-```
-./gradlew selectParserTests
-```
+It publishes whatever is on `master`, also when no parser changed since the last publication: every app then
+downloads the same parsers once more. Run it when there is something to send.
 
 ### When it does not go as planned
 
-- **A run waits for you and you have changed your mind:** reject it. Nothing is published.
-- **A run waits while something more urgent has to go out:** start another run. A waiting run holds nothing up,
-  and once something newer is published the older run can no longer publish over it, approved or not. The same
-  goes for starting an old run again.
-- **The tests cannot be run at all**, the job that runs them breaks or takes too long: start the run with
-  `skip_tests` ticked. It tests nothing and always waits for confirmation.
-- **Most runs will wait.** Many sites sit behind Cloudflare, which turns away GitHub's machines whatever the
-  parser does. Expect the automatic path only when the changed sources are not among them.
-
-### Setting up the confirmation, once
-
-The waiting is done by a GitHub environment. In the repository's Settings > Environments, create one named
-`parsers-bundle-review`, tick **Required reviewers** and add whoever may confirm a publication. Leave "Prevent
-self-review" unticked if the person who starts the run is also the one who confirms it.
-
-Until that is done, a run with a source that did not pass stops with an error instead of publishing: the
-workflow looks for the approval itself and does not take a missing environment for a yes.
+- **The run fails before its "Publish" step:** nothing is published. The log of the step that failed says why: a
+  source without a parser, parsers using something the apps do not have, or a key that is missing or not the one
+  the apps trust.
+- **Only the last step fails**, the one that removes older files: the publication is out. Starting the run again
+  is refused, as what is published is already as new, and is not needed.
+- **An old run is started again:** it publishes nothing. Once something newer is out, an older build cannot be
+  put over it.
+- **The run was started on another branch:** it does nothing. Only `master` is published.
 
 ### Taking a publication back
 

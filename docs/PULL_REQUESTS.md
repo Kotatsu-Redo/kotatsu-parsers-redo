@@ -5,11 +5,13 @@ merged, GitHub merges it by itself the moment its checks are green.
 
 What is merged here is what **Publish parsers bundle** signs and sends to every installed app the next time it is
 run (see [BUNDLE.md](BUNDLE.md)), which is why the one thing that is never automatic is somebody reading the change.
+This is also the only place parsers are tested against their sites: publishing does not test them again.
 
 ## What happens to a pull request
 
 1. **Its checks run** (`pull-request.yml`), with nothing to do for anyone:
-   - **Parser tests**: the sources it changes are run against their sites, the same way as before a publication.
+   - **Parser tests**: the sources it changes are run against their sites, with `MangaParserTest` (see
+     [Which sources are tested](#which-sources-are-tested)). The results are on the page of the run.
      Green only when everything tested passed. A failing source, one Cloudflare kept the tests away from, or a
      change no test covers makes it red: that is for a person to look at.
    - **Parsers bundle**: the parsers must still fit the apps already installed.
@@ -20,6 +22,35 @@ run (see [BUNDLE.md](BUNDLE.md)), which is why the one thing that is never autom
    behind Cloudflare, for instance).
 
 For a pull request of your own, step 2 is one click when you open it.
+
+## Which sources are tested
+
+- A source whose own file the pull request changes is always tested.
+- For each changed file that several sources share, 10 of the sources that build on it are tested: a base class
+  such as `MadaraParser` (its subclasses), or a helper in a site folder (the sources of that folder, and those
+  whose base class is in it). Testing all of them would mean hundreds of sites for one changed line.
+- When anything that every source goes through changed, `core`, `util`, the contract, the build itself, 30
+  sources taken from all of them are tested as well.
+- The samples are picked by the commit, so running again tests the same ones.
+- Sources marked `@Broken` are left out.
+- A change that leaves nothing to test, a deleted source or one that is only in broken sources, is listed as
+  untested and makes the check red.
+- If nothing that goes into the parsers changed, nothing is tested and the check is green.
+
+What a source "builds on" is its own file and the files of its base classes. A change in one source's file that
+another source happens to use is tested through the first one only.
+
+Many sites sit behind Cloudflare, which turns away GitHub's machines whatever the parser does. Expect a red
+check for those, and a maintainer merging by hand after trying the source in the app.
+
+To see which sources a branch changes without opening a pull request:
+
+```
+./gradlew selectParserTests -PcomparedWith=$(git merge-base origin/master HEAD)
+```
+
+The sources that changed themselves are the ones the pull request will test. The samples for shared files are
+picked by the commit, so the pull request's own may be other sources.
 
 ## Why somebody has to read it
 
@@ -38,7 +69,7 @@ them can rewrite the check it has to pass.
 | Workflow | Runs the pull request's code | Token | Secrets |
 |---|---|---|---|
 | `pull-request.yml` | yes | read only | none |
-| `publish-parsers-bundle.yml`, testing job | what is on `master` | read only | none |
+| `publish-parsers-bundle.yml`, checking job | what is on `master`, visiting no site | read only | none |
 | `publish-parsers-bundle.yml`, signing job | **no**: the parsers are compiled, never run | the release | the signing key |
 
 No workflow here merges anything, and none is set off by a pull request with a token that can write (there is no
@@ -69,5 +100,5 @@ In the repository settings on GitHub:
 
 - Auto-merge that a maintainer turned on is turned off by GitHub when somebody without write access pushes to
   the pull request again: the new commits have not been read.
-- Merging is not publishing. Nothing reaches the apps until **Publish parsers bundle** is run, which tests again
-  and waits for confirmation when anything is in doubt.
+- Merging is not publishing. Nothing reaches the apps until **Publish parsers bundle** is run. That run tests
+  nothing against the sites and asks nobody: what is on `master` goes out as it is.
