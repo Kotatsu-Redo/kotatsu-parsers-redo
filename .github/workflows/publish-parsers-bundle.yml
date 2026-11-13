@@ -3,11 +3,27 @@ name: Publish parsers bundle
 # Makes the parsers of master available to the apps already installed, which take them in by themselves:
 # when they are next opened, when a manga is opened, or as soon as a source fails. Nobody is asked or told.
 #
-# Run by hand, from the Actions tab: the parsers are built, checked for fitting the apps they are meant for,
-# signed and uploaded. Started by the owner of the repository it goes straight through. Started by anyone else
-# it waits for a reviewer to approve it. Nothing is tested against the sites here. That is done for every pull
-# request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
+# Runs by itself after every commit on master that changes what the parsers are made of, and can be run by
+# hand from the Actions tab: the parsers are built, checked for fitting the apps they are meant for, signed and
+# uploaded. When the commit was pushed or merged by the owner, or the run started by them, it goes straight
+# through. For anyone else it waits for a reviewer to approve it. Nothing is tested against the sites here.
+# That is done for every pull request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
 on:
+  push:
+    branches:
+      - master
+    # What goes into the parsers, the same list the pull request tests go by (SelectParserTestsTask). A
+    # commit that touches none of it, the documents or a workflow say, would only make every app download
+    # the same parsers again
+    paths:
+      - 'src/main/**'
+      - 'src/contract/**'
+      - 'kotatsu-parsers-ksp/**'
+      - 'buildSrc/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
   workflow_dispatch:
 
 permissions:

@@ -3,8 +3,9 @@
 Every pull request to `master` is tested without anyone asking. Once a maintainer has read it and said it may be
 merged, GitHub merges it by itself the moment its checks are green.
 
-What is merged here is what **Publish parsers bundle** signs and sends to every installed app the next time it is
-run (see [BUNDLE.md](BUNDLE.md)), which is why the one thing that is never automatic is somebody reading the change.
+What is merged here is signed and sent to every installed app by **Publish parsers bundle**, which starts by
+itself when a merge changes the parsers (see [BUNDLE.md](BUNDLE.md)). That is why the one thing that is never
+automatic is somebody reading the change.
 This is also the only place parsers are tested against their sites: publishing does not test them again.
 
 ## What happens to a pull request
@@ -101,6 +102,7 @@ In the repository settings on GitHub:
 
 - Auto-merge that a maintainer turned on is turned off by GitHub when somebody without write access pushes to
   the pull request again: the new commits have not been read.
-- Merging is not publishing. Nothing reaches the apps until **Publish parsers bundle** is run. That run tests
-  nothing against the sites: what is on `master` goes out as it is. A run started by somebody other than the
-  owner waits for a reviewer first.
+- Merging is publishing. A merge that changes the parsers starts **Publish parsers bundle** by itself, and that
+  run tests nothing against the sites: what is on `master` goes out as it is, within minutes. When GitHub
+  names the owner as the one who merged, nobody else is asked. For any other name, a bot's included, the run
+  waits for a reviewer first.

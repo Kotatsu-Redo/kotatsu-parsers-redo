@@ -9,10 +9,14 @@ This is how a fix merged here gets to people in minutes instead of with the next
 
 ## Publishing
 
-Run **Publish parsers bundle** from the Actions tab, on `master`. There is nothing to fill in. When the owner
-(the one account named in the workflow) starts it, it goes straight through. When anyone else does, it waits for a reviewer to
-approve it from the page of the run ("Review deployments"): see
-[Who is asked to confirm](#who-is-asked-to-confirm). Either way it does two things:
+**Publish parsers bundle** runs by itself after every commit on `master` that changes what the parsers are made
+of: the parsers, the contract, or the build. A commit that only touches documents or workflows starts nothing.
+It can also be run by hand from the Actions tab, on `master`, with nothing to fill in.
+
+When the commit was pushed or merged by the owner (the one account named in the workflow), or the run was
+started by them, it goes straight through. For anyone else it waits for a reviewer to approve it from the page
+of the run ("Review deployments"): see [Who is asked to confirm](#who-is-asked-to-confirm). Either way it does
+two things:
 
 1. **Checks what is on `master`.** Every source has to have its parser, and the parsers have to fit the apps
    they are meant for (see [The checks](#the-checks)). No site is visited.
@@ -30,8 +34,11 @@ tested against the sites when publishing.** That is done for every pull request,
 [PULL_REQUESTS.md](PULL_REQUESTS.md). What is pushed to `master` without a pull request is tested by whoever
 pushes it, or not at all.
 
-It publishes whatever is on `master`, also when no parser changed since the last publication: every app then
-downloads the same parsers once more. Run it when there is something to send.
+A run started by hand publishes whatever is on `master`, also when no parser changed since the last
+publication: every app then downloads the same parsers once more. Do that when there is something to send.
+
+When several commits land one after another, each starts a run, and only the one of the newest commit
+publishes: the others find that `master` has moved on and stop.
 
 ### When it does not go as planned
 
