@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("ALLIED_FANSUB", "AlliedFansub", "tr", ContentType.HENTAI)
 internal class AlliedFansub(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ALLIED_FANSUB, "alliedfansub.net", 20) {

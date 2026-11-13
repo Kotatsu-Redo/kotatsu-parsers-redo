@@ -6,8 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
-//This source requires an account.
+@Broken("Chapters require site membership/login")
 @MangaSourceParser("GRIMELEK", "Grimelek", "tr")
 internal class Grimelek(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.GRIMELEK, "siyahmelek.org", 20) {

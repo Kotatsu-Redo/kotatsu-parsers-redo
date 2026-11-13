@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("TMOMANGA", "TmoManga", "es")
 internal class TmoManga(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.TMOMANGA, "tmomanga.com") {

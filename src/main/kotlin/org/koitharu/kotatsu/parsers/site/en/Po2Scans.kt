@@ -10,7 +10,7 @@ import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("PO2SCANS", "Po2Scans", "en")
 internal class Po2Scans(context: MangaLoaderContext) :
 	SinglePageMangaParser(context, MangaParserSource.PO2SCANS) {

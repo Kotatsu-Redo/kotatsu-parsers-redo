@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("UKIYOTOON", "UkiyoToon", "es")
 internal class UkiyoToon(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.UKIYOTOON, "nakamatoon.com", 30, 10) {

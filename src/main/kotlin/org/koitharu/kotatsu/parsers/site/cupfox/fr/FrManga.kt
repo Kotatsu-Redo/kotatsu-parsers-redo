@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.cupfox.CupFoxParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("FRMANGA", "FrManga", "fr")
 internal class FrManga(context: MangaLoaderContext) :
 	CupFoxParser(context, MangaParserSource.FRMANGA, "www.frmanga.com")

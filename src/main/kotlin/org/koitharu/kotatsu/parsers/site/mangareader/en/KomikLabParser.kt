@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("KOMIKLAB", "KomikLab", "en")
 internal class KomikLabParser(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KOMIKLAB, "komiklab.com", pageSize = 20, searchPageSize = 10) {

@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.zeistmanga.ZeistMangaParser
 
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("MAGERIN", "Magerin", "id")
 internal class Magerin(context: MangaLoaderContext) :
 	ZeistMangaParser(context, MangaParserSource.MAGERIN, "www.magerin.com")

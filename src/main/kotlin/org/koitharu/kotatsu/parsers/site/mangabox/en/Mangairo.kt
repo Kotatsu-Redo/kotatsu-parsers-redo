@@ -17,7 +17,7 @@ import org.koitharu.kotatsu.parsers.site.mangabox.MangaboxParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("MANGAIRO", "MangaIro", "en")
 internal class Mangairo(context: MangaLoaderContext) :
 	MangaboxParser(context, MangaParserSource.MANGAIRO) {

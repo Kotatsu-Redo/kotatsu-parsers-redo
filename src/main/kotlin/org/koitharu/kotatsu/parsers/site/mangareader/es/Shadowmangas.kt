@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("SHADOWMANGAS", "ShadowMangas", "es")
 internal class Shadowmangas(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.SHADOWMANGAS, "shadowmangas.com", pageSize = 10, searchPageSize = 10) {

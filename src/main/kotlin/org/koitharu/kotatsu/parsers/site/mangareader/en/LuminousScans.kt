@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("LUMINOUSSCANS", "RadiantScans", "en")
 internal class LuminousScans(context: MangaLoaderContext) :
 	MangaReaderParser(

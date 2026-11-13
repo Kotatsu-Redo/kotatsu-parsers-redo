@@ -17,7 +17,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONToSet
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken("Need to wait sources get more stable")
+@Broken("Website under maintenance")
 @MangaSourceParser("CROWSCANS", "VipManga", "ar")
 internal class Vipmanga(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.CROWSCANS, 15) {

@@ -17,7 +17,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("FLIXSCANSORG", "FlixScans.org", "en")
 internal class FlixScansOrg(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.FLIXSCANSORG, 18) {

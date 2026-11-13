@@ -19,7 +19,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("VCOMYCS", "Vcomycs", "vi", ContentType.MANGA)
 internal class VcomycsParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.VCOMYCS, 36) {

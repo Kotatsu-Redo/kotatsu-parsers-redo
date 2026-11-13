@@ -33,7 +33,7 @@ import java.util.EnumSet
 import java.util.Locale
 import java.util.TimeZone
 
-@Broken("The source to change structure")
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("POSEIDONSCANS", "Poseidon Scans", "fr")
 internal class PoseidonScans(context: MangaLoaderContext) :
 	SinglePageMangaParser(context, MangaParserSource.POSEIDONSCANS) {

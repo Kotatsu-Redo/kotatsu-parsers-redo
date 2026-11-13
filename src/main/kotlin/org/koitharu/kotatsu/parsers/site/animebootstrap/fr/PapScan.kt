@@ -12,7 +12,7 @@ import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("PAPSCAN", "PapScan", "fr")
 internal class PapScan(context: MangaLoaderContext) :
 	AnimeBootstrapParser(context, MangaParserSource.PAPSCAN, "papscan.com") {

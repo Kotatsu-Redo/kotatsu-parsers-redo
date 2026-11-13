@@ -12,7 +12,7 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Site online but parser no longer works correctly")
 @MangaSourceParser("HENTAIORIGINES", "HentaiOrigines", "fr", ContentType.HENTAI)
 internal class HentaiOrigines(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.HENTAIORIGINES, "hentai-origines.com") {

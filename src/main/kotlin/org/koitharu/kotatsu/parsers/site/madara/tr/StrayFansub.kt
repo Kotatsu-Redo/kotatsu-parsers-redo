@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken // The website is not functioning and displays the Plesk panel
+@Broken("Domain parked or for sale")
 @MangaSourceParser("STRAYFANSUB", "StrayFansub", "tr")
 internal class StrayFansub(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.STRAYFANSUB, "strayfansub.com", 16) {

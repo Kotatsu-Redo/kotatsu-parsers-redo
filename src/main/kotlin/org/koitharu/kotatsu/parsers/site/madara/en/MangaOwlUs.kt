@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("MANGAOWL_US", "MangaOwlYaoi", "en", ContentType.HENTAI)
 internal class MangaOwlUs(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGAOWL_US, "mangaowlyaoi.com")

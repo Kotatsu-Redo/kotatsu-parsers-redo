@@ -13,7 +13,7 @@ import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.asTypedList
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("KOMIKGES", "KomikGes", "id")
 internal class KomikGes(context: MangaLoaderContext) :
 	ZeistMangaParser(context, MangaParserSource.KOMIKGES, "www.komikges.my.id") {

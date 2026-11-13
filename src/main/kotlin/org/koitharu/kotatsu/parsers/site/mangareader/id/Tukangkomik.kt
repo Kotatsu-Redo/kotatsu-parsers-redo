@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("TUKANGKOMIK", "Tukang Komik", "id")
 internal class Tukangkomik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.TUKANGKOMIK, "tukangkomik.co", pageSize = 20, searchPageSize = 20) {

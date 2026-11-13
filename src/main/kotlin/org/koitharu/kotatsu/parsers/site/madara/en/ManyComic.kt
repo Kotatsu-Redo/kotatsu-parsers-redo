@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MANYCOMIC", "ManyComic", "en", ContentType.HENTAI)
 internal class ManyComic(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANYCOMIC, "manycomic.com") {

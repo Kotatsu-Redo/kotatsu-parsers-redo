@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("ROBINMANGA", "RobinManga", "tr")
 internal class RobinManga(context: MangaLoaderContext) :
 	MangaReaderParser(

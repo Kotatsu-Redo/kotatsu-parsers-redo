@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken // Host error
+@Broken("Domain no longer resolves")
 @MangaSourceParser("STICKHORSE", "StickHorse", "es")
 internal class Stickhorse(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.STICKHORSE, "www.stickhorse.cl") {

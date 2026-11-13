@@ -14,7 +14,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MANGAOWL", "MangaOwl.to", "en")
 internal class Mangaowl(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.MANGAOWL, pageSize = 24) {

@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangahub.MangaHubParser
 
-@Broken("BLOCKED BY CLOUDFARE")
+@Broken("Blocked by Cloudflare challenge")
 
 @MangaSourceParser("MANGAHUB_IO", "MangaHubIO", "en")
 internal class MangaHubIo(context: MangaLoaderContext) :

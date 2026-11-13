@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("BANANASCAN", "BananaScan", "fr")
 internal class BananaScan(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.BANANASCAN, "banana-scan.com", pageSize = 20, searchPageSize = 20) {

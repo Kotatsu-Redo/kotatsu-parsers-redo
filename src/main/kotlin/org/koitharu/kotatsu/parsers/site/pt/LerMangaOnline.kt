@@ -11,7 +11,7 @@ import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("LERMANGAONLINE", "LerMangaOnline", "pt")
 internal class LerMangaOnline(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.LERMANGAONLINE, 20) {

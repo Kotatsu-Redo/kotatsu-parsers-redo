@@ -31,7 +31,7 @@ import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 
-@Broken("Original site closed, all domains gone")
+@Broken("Original site closed")
 @MangaSourceParser("MANHUASCAN", "kaliscan.io", "en")
 internal class ManhuaScan(context: MangaLoaderContext) :
 	MadthemeParser(context, MangaParserSource.MANHUASCAN, "kaliscan.io") {

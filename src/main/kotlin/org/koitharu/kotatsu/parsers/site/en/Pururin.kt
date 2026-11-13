@@ -14,7 +14,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("PURURIN", "Pururin", "en", ContentType.HENTAI)
 internal class Pururin(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.PURURIN, pageSize = 20) {

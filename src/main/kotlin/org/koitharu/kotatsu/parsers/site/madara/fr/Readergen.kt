@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site returns HTTP 5xx")
 @MangaSourceParser("READERGEN", "ReaderGen", "fr")
 internal class Readergen(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.READERGEN, "fr.readergen.fr", 18)

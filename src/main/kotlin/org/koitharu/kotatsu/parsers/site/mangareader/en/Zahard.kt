@@ -10,7 +10,7 @@ import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.urlEncoded
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("ZAHARD", "Zahard", "en")
 internal class Zahard(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.ZAHARD, "zahard.xyz", pageSize = 20, searchPageSize = 30) {

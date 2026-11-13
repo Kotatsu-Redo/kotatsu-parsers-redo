@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("INFAMOUSSCANS", "InfamousScans", "en")
 internal class InfamousScans(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.INFAMOUSSCANS, "infamous-scans.com", 10)

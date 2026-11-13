@@ -27,7 +27,7 @@ import org.koitharu.kotatsu.parsers.util.textOrNull
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("HUNTERSSCAN", "HuntersScan", "pt")
 internal class HuntersScan(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.HUNTERSSCAN, "readhunters.xyz", pageSize = 50) {

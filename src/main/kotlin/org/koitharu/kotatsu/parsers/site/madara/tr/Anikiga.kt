@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site online but parser no longer works correctly")
 @MangaSourceParser("ANIKIGA", "Anikiga", "tr")
 internal class Anikiga(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ANIKIGA, "anikiga.com") {

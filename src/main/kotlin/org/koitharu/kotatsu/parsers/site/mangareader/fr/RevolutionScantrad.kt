@@ -10,7 +10,7 @@ import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("REVOLUTIONSCANTRAD", "RevolutionScantrad", "fr")
 internal class RevolutionScantrad(context: MangaLoaderContext) :
 	MangaReaderParser(

@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.*
 
-@Broken
+@Broken("Not dead, changed template")
 @MangaSourceParser("KATAKOMIK", "KataKomik", "id")
 internal class KataKomik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KATAKOMIK, "katakomik.my.id", pageSize = 20, searchPageSize = 10) {

@@ -45,7 +45,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
 import java.util.EnumSet
 import java.util.Locale
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("COMIKURO", "Comikuro", "en")
 internal class Comikuro(context: MangaLoaderContext) : PagedMangaParser(context, MangaParserSource.COMIKURO, 21) {
 

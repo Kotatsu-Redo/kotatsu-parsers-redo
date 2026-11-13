@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.scan.ScanParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("MANGABR", "MangaBr", "pt")
 internal class MangaBr(context: MangaLoaderContext) :
 	ScanParser(context, MangaParserSource.MANGABR, "mangabr.net")

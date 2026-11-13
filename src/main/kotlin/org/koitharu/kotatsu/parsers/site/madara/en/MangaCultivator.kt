@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MANGACULTIVATOR", "MangaCultivator", "en")
 internal class MangaCultivator(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGACULTIVATOR, "mangacultivator.com", 10)

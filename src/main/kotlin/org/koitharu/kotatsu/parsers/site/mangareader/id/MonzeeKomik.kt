@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.*
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("MONZEEKOMIK", "MonzeeKomik", "id")
 internal class MonzeeKomik(context: MangaLoaderContext) :
 	MangaReaderParser(

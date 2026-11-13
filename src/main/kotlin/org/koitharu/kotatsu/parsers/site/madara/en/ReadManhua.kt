@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("READMANHUA", "ReadManhua (Broken)", "en", ContentType.HENTAI)
 internal class ReadManhua(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.READMANHUA, "readmanhua.net", 20) {

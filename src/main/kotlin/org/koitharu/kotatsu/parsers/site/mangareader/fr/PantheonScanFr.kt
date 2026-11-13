@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site returns HTTP 404")
 @MangaSourceParser("PANTHEONSCAN_FR", "PantheonScan.fr", "fr")
 internal class PantheonScanFr(context: MangaLoaderContext) :
 	MangaReaderParser(

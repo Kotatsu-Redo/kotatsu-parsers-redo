@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("WITCOMICS", "WitComics", "it")
 internal class WitComics(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.WITCOMICS, "www.witcomics.net", pageSize = 5, searchPageSize = 10) {

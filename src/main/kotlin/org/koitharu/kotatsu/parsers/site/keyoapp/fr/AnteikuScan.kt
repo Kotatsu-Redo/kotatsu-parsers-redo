@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.keyoapp.KeyoappParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("ANTEIKUSCAN", "AnteikuScan", "fr")
 internal class AnteikuScan(context: MangaLoaderContext) :
 	KeyoappParser(context, MangaParserSource.ANTEIKUSCAN, "anteikuscan.fr")

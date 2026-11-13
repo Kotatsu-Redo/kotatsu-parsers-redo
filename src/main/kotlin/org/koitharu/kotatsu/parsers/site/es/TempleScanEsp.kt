@@ -15,7 +15,7 @@ import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("TEMPLESCANESP", "TempleScanEsp", "es", ContentType.HENTAI)
 internal class TempleScanEsp(context: MangaLoaderContext) :
 	SinglePageMangaParser(context, MangaParserSource.TEMPLESCANESP) {

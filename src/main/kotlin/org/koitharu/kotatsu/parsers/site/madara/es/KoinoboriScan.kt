@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken("Not dead, changed template")
+@Broken("Domain parked or for sale")
 @MangaSourceParser("KOINOBORISCAN", "KoinoboriScan", "es")
 internal class KoinoboriScan(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.KOINOBORISCAN, "visorkoi.com") {

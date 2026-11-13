@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.Locale
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("JAPSCANSFR", "JapScans.fr", "fr")
 internal class JapScansFR(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.JAPSCANSFR, "japscans.fr", pageSize = 20, searchPageSize = 10) {

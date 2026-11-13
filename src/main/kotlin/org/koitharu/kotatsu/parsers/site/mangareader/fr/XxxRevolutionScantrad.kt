@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("XXXREVOLUTIONSCANTRAD", "Xxx.RevolutionScantrad", "fr", ContentType.HENTAI)
 internal class XxxRevolutionScantrad(context: MangaLoaderContext) :
 	MangaReaderParser(

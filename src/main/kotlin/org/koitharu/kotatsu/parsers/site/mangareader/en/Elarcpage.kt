@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("ELARCPAGE", "ElarcPage", "en")
 internal class Elarcpage(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.ELARCPAGE, "elarctoon.com", pageSize = 20, searchPageSize = 10) {

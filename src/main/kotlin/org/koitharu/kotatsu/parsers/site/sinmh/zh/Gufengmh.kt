@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.sinmh.SinmhParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("GUFENGMH", "Gufengmh", "zh")
 internal class Gufengmh(context: MangaLoaderContext) :
 	SinmhParser(context, MangaParserSource.GUFENGMH, "www.gufengmh.com")

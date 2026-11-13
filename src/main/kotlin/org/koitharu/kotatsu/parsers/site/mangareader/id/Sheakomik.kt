@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("SHEAKOMIK", "SheaKomik", "id")
 internal class Sheakomik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.SHEAKOMIK, "sheakomik.com", pageSize = 40, searchPageSize = 40) {

@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("KYUMIK", "Kyumik", "id", ContentType.HENTAI)
 internal class Kyumik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KYUMIK, "kyumik.com", pageSize = 20, searchPageSize = 10)
