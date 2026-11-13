@@ -1,5 +1,6 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -33,12 +34,32 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 
 	override val configKeyDomain = ConfigKey.Domain("asurascans.com")
 
-	private val apiUrl get() = "https://api.$domain/api"
+	// Earlier versions used asuracomic.net, which stays in saved settings until replaced
+	private val siteDomain: String
+		get() {
+			val host = domain.removePrefix("www.")
+			return if (host.equals(LEGACY_DOMAIN, ignoreCase = true)) configKeyDomain.defaultValue else host
+		}
+
+	private val apiUrl: String
+		get() = "https://api.$siteDomain/api"
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
 		keys.add(userAgentKey)
 	}
+
+	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
+		.set("Referer", "https://$siteDomain/")
+		.build()
+
+	override suspend fun getFavicons(): Favicons = runCatchingCancellable {
+		FaviconParser(webClient, siteDomain).parseFavicons()
+	}.getOrElse {
+		Favicons.single("https://$siteDomain/favicon.ico")
+	}
+
+	override suspend fun getPageUrl(page: MangaPage): String = page.url.toAbsoluteUrl(siteDomain)
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.RATING,
@@ -71,12 +92,15 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		),
 	)
 
+	@Volatile
 	private var tagsCache: Set<MangaTag>? = null
 
 	private suspend fun fetchTags(): Set<MangaTag> {
 		tagsCache?.let { return it }
 		val tags = webClient.httpGet("$apiUrl/genres").parseJson().optJSONArray("data")?.toTags().orEmpty()
-		tagsCache = tags
+		if (tags.isNotEmpty()) {
+			tagsCache = tags
+		}
 		return tags
 	}
 
@@ -122,7 +146,7 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 				SortOrder.RATING -> "rating" to "desc"
 				SortOrder.POPULARITY -> "popular" to "desc"
 				// By the date the series was added
-				SortOrder.NEWEST -> "update" to "desc"
+				SortOrder.NEWEST -> "newest" to "desc"
 				SortOrder.ALPHABETICAL_DESC -> "title" to "desc"
 				SortOrder.ALPHABETICAL -> "title" to "asc"
 				else -> "latest" to "desc"
@@ -139,38 +163,53 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 	 * Asura appends the same site-wide token to every series slug on its pages
 	 * (`/comics/<slug>-00dcbf97`, identical across all series) and rotates it
 	 * whenever the site is redeployed. The API names a series by the bare slug,
-	 * which is what the stored urls (and so the ids) are made of, and the site
-	 * answers a url without the token with a redirect to the current one.
+	 * which is what the stored urls (and so the ids) are made of, while `public_url`
+	 * carries the current tokenized path for opening the page in a browser.
 	 */
 	private fun JSONObject.toManga(): Manga? {
-		val slug = getStringOrNull("slug") ?: return null
+		val slug = getStringOrNull("slug")?.replace(slugTokenRegex, "")?.nullIfEmpty() ?: return null
 		val url = "/comics/$slug"
+		val publicPath = getStringOrNull("public_url")?.nullIfEmpty() ?: url
 		val rating = getFloatOrDefault("rating", 0f)
 		return Manga(
 			id = generateUid(url),
 			url = url,
-			publicUrl = url.toAbsoluteUrl(domain),
-			coverUrl = getStringOrNull("cover"),
-			title = getStringOrNull("title") ?: return null,
+			publicUrl = publicPath.toAbsoluteUrl(siteDomain),
+			coverUrl = getStringOrNull("cover")?.nullIfEmpty()?.toAbsoluteUrl(siteDomain),
+			title = getStringOrNull("title")?.nullIfEmpty() ?: return null,
 			altTitles = optJSONArray("alt_titles")?.toStringSet().orEmpty(),
 			rating = if (rating > 0f) (rating / 10f).coerceAtMost(1f) else RATING_UNKNOWN,
 			tags = optJSONArray("genres")?.toTags().orEmpty(),
-			authors = setOfNotNull(
-				getStringOrNull("author")?.trim()?.nullIfEmpty(),
-				getStringOrNull("artist")?.trim()?.nullIfEmpty(),
-			),
+			authors = parseAuthors(getStringOrNull("author"), getStringOrNull("artist")),
 			state = when (getStringOrNull("status")?.lowercase(Locale.ENGLISH)) {
 				"ongoing" -> MangaState.ONGOING
 				"completed" -> MangaState.FINISHED
-				"hiatus" -> MangaState.PAUSED
-				"dropped", "axed" -> MangaState.ABANDONED
+				"hiatus", "season end" -> MangaState.PAUSED
+				"dropped", "axed", "cancelled", "canceled" -> MangaState.ABANDONED
 				else -> null
 			},
-			description = getStringOrNull("description"),
+			description = getStringOrNull("description")?.trim()?.nullIfEmpty(),
 			source = source,
 			contentRating = if (isNsfwSource) ContentRating.ADULT else null,
 		)
 	}
+
+	private fun parseAuthors(vararg values: String?): Set<String> {
+		val result = LinkedHashSet<String>()
+		for (raw in values) {
+			if (raw.isNullOrBlank()) continue
+			raw.replace(naAuthorRegex, "").split(',', '/').forEach { part ->
+				val name = part.trim()
+				if (name.isNotEmpty() && !name.isPlaceholderAuthor()) {
+					result.add(name)
+				}
+			}
+		}
+		return result
+	}
+
+	private fun String.isPlaceholderAuthor(): Boolean =
+		this == "_" || this == "-" || equals("updating", ignoreCase = true)
 
 	private fun JSONArray.toTags(): Set<MangaTag> = mapJSONNotNullToSet { json ->
 		MangaTag(
@@ -181,22 +220,23 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-		// A slug saved with an old token is still answered, with a redirect
-		val response = webClient.httpGet("$apiUrl/series/${manga.url.toSeriesSlug()}").parseJson()
+		val requestedSlug = manga.url.toSeriesSlug()
+		val response = webClient.httpGet("$apiUrl/series/$requestedSlug").parseJson()
 		// Some series come wrapped in `data`, others don't
 		val json = (response.optJSONObject("data") ?: response).getJSONObject("series")
 		val details = json.toManga() ?: throw ParseException("No series in the response", manga.url)
+		val slug = details.url.removePrefix("/comics/")
 		return manga.copy(
 			title = details.title,
-			altTitles = details.altTitles,
+			altTitles = details.altTitles.ifEmpty { manga.altTitles },
 			publicUrl = details.publicUrl,
 			coverUrl = details.coverUrl ?: manga.coverUrl,
-			rating = details.rating,
-			tags = details.tags,
-			authors = details.authors,
-			state = details.state,
-			description = details.description,
-			chapters = loadChapters(json.getString("slug")),
+			rating = if (details.rating != RATING_UNKNOWN) details.rating else manga.rating,
+			tags = details.tags.ifEmpty { manga.tags },
+			authors = details.authors.ifEmpty { manga.authors },
+			state = details.state ?: manga.state,
+			description = details.description ?: manga.description.orEmpty(),
+			chapters = loadChapters(slug),
 		)
 	}
 
@@ -207,9 +247,7 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		val now = System.currentTimeMillis()
 		return data.mapJSONNotNull { json ->
 			// The newest chapters are first sold as early access, and can only be read with a paid account
-			val isLocked = json.optBoolean("is_premium") || json.optBoolean("is_locked") ||
-				dateFormat.parseSafe(json.getStringOrNull("early_access_until")) > now
-			if (isLocked) {
+			if (json.lockState(dateFormat, now) != LockState.UNLOCKED) {
 				return@mapJSONNotNull null
 			}
 			val number = json.optString("number").removeSuffix(".0").nullIfEmpty() ?: return@mapJSONNotNull null
@@ -222,32 +260,40 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 				volume = 0,
 				url = url,
 				scanlator = null,
-				uploadDate = dateFormat.parseSafe(
-					json.getStringOrNull("published_at") ?: json.getStringOrNull("created_at"),
-				),
+				uploadDate = dateFormat.parseTimestamp(json.getStringOrNull("published_at")).takeIf { it > 0L }
+					?: dateFormat.parseTimestamp(json.getStringOrNull("created_at")),
 				branch = null,
 				source = source,
 			)
-		}.reversed()
+		}.distinctBy { it.url }.reversed()
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val (slug, number) = chapterUrlRegex.find(chapter.url)?.destructured
+		val (slug, number) = parseChapterUrl(chapter.url)
 			?: throw ParseException("Unexpected chapter url: ${chapter.url}", chapter.url)
 		val response = webClient.httpGet("$apiUrl/series/$slug/chapters/$number").parseJson()
 		val data = response.optJSONObject("data") ?: response
-		val pages = data.optJSONObject("chapter")?.optJSONArray("pages")
+		val chapterJson = data.optJSONObject("chapter")
+		val pages = chapterJson?.optJSONArray("pages")
 		if (pages == null || pages.length() == 0) {
-			if (data.optBoolean("is_locked")) {
-				throw ParseException(
+			val dateFormat = newDateFormat()
+			val now = System.currentTimeMillis()
+			val lock = chapterJson?.lockState(dateFormat, now)?.takeIf { it != LockState.UNLOCKED }
+				?: data.lockState(dateFormat, now)
+			when (lock) {
+				LockState.EARLY_ACCESS -> throw ParseException(
 					"This chapter is in early access, it can only be read with a paid account for now",
 					chapter.url,
 				)
+				LockState.PAYWALLED -> throw ParseException(
+					"This chapter requires a paid account",
+					chapter.url,
+				)
+				LockState.UNLOCKED -> return emptyList()
 			}
-			return emptyList()
 		}
 		return pages.mapJSONNotNull { json ->
-			val url = json.getStringOrNull("url") ?: return@mapJSONNotNull null
+			val url = json.getStringOrNull("url")?.nullIfEmpty() ?: return@mapJSONNotNull null
 			val tiles = json.optJSONArray("tiles")
 			MangaPage(
 				id = generateUid(url),
@@ -265,14 +311,61 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		}
 	}
 
+	private enum class LockState {
+		UNLOCKED,
+		EARLY_ACCESS,
+		PAYWALLED,
+	}
+
+	private fun JSONObject.lockState(dateFormat: SimpleDateFormat, now: Long): LockState {
+		val unlockAt = dateFormat.parseTimestamp(getStringOrNull("early_access_until"))
+		return when {
+			unlockAt > now -> LockState.EARLY_ACCESS
+			optBoolean("is_locked") -> LockState.PAYWALLED
+			optBoolean("is_premium") && unlockAt == 0L -> LockState.PAYWALLED
+			else -> LockState.UNLOCKED
+		}
+	}
+
 	/**
 	 * A page can be served cut into a grid of tiles in a shuffled order: `tiles[i]` is where the tile at
 	 * position `i` of the served image belongs.
 	 */
 	override fun intercept(chain: Interceptor.Chain): Response {
-		val request = chain.request()
+		val original = chain.request()
+		val targetDomain = siteDomain
+		// Do not rewrite gg.asuracomic.net: older chapter images are still hosted there
+		val rewrittenUrl = when {
+			original.url.host.equals(LEGACY_DOMAIN, ignoreCase = true) ||
+				original.url.host.equals("www.$LEGACY_DOMAIN", ignoreCase = true) ->
+				original.url.newBuilder().scheme("https").host(targetDomain).build()
+			original.url.host.equals("api.$LEGACY_DOMAIN", ignoreCase = true) ->
+				original.url.newBuilder().scheme("https").host("api.$targetDomain").build()
+			else -> original.url
+		}
+		val origin = "https://$targetDomain"
+		val host = rewrittenUrl.host
+		val isApiRequest = host.equals("api.$targetDomain", ignoreCase = true)
+		val isSiteAsset = isAsuraHost(host, targetDomain)
+		val request = original.newBuilder()
+			.url(rewrittenUrl)
+			.removeHeader("Cache-Control")
+			.removeHeader("Pragma")
+			.apply {
+				if (isSiteAsset) {
+					header("Referer", "$origin/")
+				} else {
+					removeHeader("Referer")
+				}
+				if (isApiRequest) {
+					header("Origin", origin)
+				} else {
+					removeHeader("Origin")
+				}
+			}
+			.build()
 		val response = chain.proceed(request)
-		val fragment = request.url.fragment
+		val fragment = original.url.fragment
 		if (fragment == null || !fragment.startsWith(TILES_FRAGMENT) || !response.isSuccessful) {
 			return response
 		}
@@ -286,6 +379,14 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		}
 		return context.redrawImageResponse(response) { bitmap -> unscramble(bitmap, tiles, columns, rows) }
 	}
+
+	private fun String.isDomainOrSubdomainOf(base: String): Boolean =
+		equals(base, ignoreCase = true) || endsWith(".$base", ignoreCase = true)
+
+	private fun isAsuraHost(host: String, targetDomain: String): Boolean =
+		host.isDomainOrSubdomainOf(targetDomain) ||
+			host.isDomainOrSubdomainOf(configKeyDomain.defaultValue) ||
+			host.isDomainOrSubdomainOf(LEGACY_DOMAIN)
 
 	private fun unscramble(source: Bitmap, tiles: List<Int>, columns: Int, rows: Int): Bitmap {
 		val tileWidth = source.width / columns
@@ -305,30 +406,63 @@ internal class AsuraScansParser(context: MangaLoaderContext) :
 		return result
 	}
 
-	// Links copied from the site carry the slug token, and can be those of a chapter
+	// Links copied from the site carry the slug token, and can be those of a chapter or an older URL scheme
 	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
 		val segments = link.pathSegments
-		if (segments.firstOrNull() != "comics") return null
-		val slug = segments.getOrNull(1)?.replace(slugTokenRegex, "")?.nullIfEmpty() ?: return null
+		val kind = segments.firstOrNull() ?: return null
+		val rawSlug = segments.getOrNull(1)?.nullIfEmpty() ?: return null
+		val slug = when (kind) {
+			"comics", "series" -> rawSlug.replace(slugTokenRegex, "")
+			"manga" -> rawSlug.replace(legacyIdPrefixRegex, "").replace(slugTokenRegex, "")
+			else -> return null
+		}.nullIfEmpty() ?: return null
 		return resolver.resolveManga(this, url = "/comics/$slug")
 	}
 
 	private fun String.toSeriesSlug(): String {
 		val segments = substringBefore('?').substringBefore('#').split('/').filter { it.isNotEmpty() }
-		val index = segments.indexOfFirst { it == "comics" || it == "series" }
-		return segments.getOrNull(index + 1) ?: throw ParseException("Unexpected series url: $this", this)
+		val index = segments.indexOfFirst { it == "comics" || it == "series" || it == "manga" }
+		val rawSlug = if (index >= 0) segments.getOrNull(index + 1) else null
+		val slug = rawSlug?.let {
+			if (segments[index] == "manga") it.replace(legacyIdPrefixRegex, "") else it
+		}?.replace(slugTokenRegex, "")?.nullIfEmpty()
+		return slug ?: throw ParseException("Unexpected series url: $this", this)
 	}
 
-	// Dates come with a varying number of fraction digits, or none
+	private fun parseChapterUrl(url: String): Pair<String, String>? {
+		chapterUrlRegex.find(url)?.destructured?.let { (rawSlug, number) ->
+			val slug = rawSlug.replace(slugTokenRegex, "").nullIfEmpty() ?: return null
+			return slug to number
+		}
+		legacyMangaChapterUrlRegex.find(url)?.destructured?.let { (rawSlug, rawNumber) ->
+			val slug = rawSlug.replace(legacyIdPrefixRegex, "").replace(slugTokenRegex, "").nullIfEmpty()
+				?: return null
+			val number = if (legacyDecimalNumberRegex.matches(rawNumber)) rawNumber.replace('-', '.') else rawNumber
+			return slug to number
+		}
+		return null
+	}
+
+	// Dates come with a varying number of fraction digits, or none; Go zero timestamps start at year 0001
 	private fun newDateFormat() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT).apply {
 		timeZone = TimeZone.getTimeZone("UTC")
 	}
 
+	private fun SimpleDateFormat.parseTimestamp(raw: String?): Long {
+		if (raw.isNullOrBlank() || raw.startsWith("0001-")) return 0L
+		return parseSafe(raw).takeIf { it > 0L } ?: 0L
+	}
+
 	private companion object {
+		private const val LEGACY_DOMAIN = "asuracomic.net"
 		private const val TILES_FRAGMENT = "tiles="
 		private const val DEFAULT_TILE_COLUMNS = 4
 		private const val DEFAULT_TILE_ROWS = 5
+		private val naAuthorRegex = Regex("""\bn/a\b""", RegexOption.IGNORE_CASE)
 		private val slugTokenRegex = Regex("""-[0-9a-f]{8}$""")
+		private val legacyIdPrefixRegex = Regex("""^\d{6,}-""")
+		private val legacyDecimalNumberRegex = Regex("""^\d+-\d+$""")
 		private val chapterUrlRegex = Regex("""/(?:comics|series)/([^/]+)/chapter/([^/?#]+)""")
+		private val legacyMangaChapterUrlRegex = Regex("""/manga/([^/]+)/chapter-([^/?#]+)""")
 	}
 }
