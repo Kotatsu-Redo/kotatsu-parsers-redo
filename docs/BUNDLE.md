@@ -35,7 +35,10 @@ downloads the same parsers once more. Run it when there is something to send.
 
 - **The run fails before its "Publish" step:** nothing is published. The log of the step that failed says why: a
   source without a parser, parsers using something the apps do not have, or a key that is missing or not the one
-  the apps trust.
+  the apps trust. "No key to sign the parsers with" means the secret is not in the `PARSERS_SIGNING_KEY`
+  environment: see [The key](#the-key).
+- **The run waits at "publish" for a review:** the environment has required reviewers. Approve it from the page
+  of the run, or untick them in the environment's settings.
 - **Only the last step fails**, the one that removes older files: the publication is out. Starting the run again
   is refused, as what is published is already as new, and is not needed.
 - **An old run is started again:** it publishes nothing. Once something newer is out, an older build cannot be
@@ -56,10 +59,14 @@ The zip is code that runs inside the app with everything the app can reach. The 
 manifest is signed with the one key it was built to trust: where the file was downloaded from counts for nothing.
 
 **Whoever has the private key, or can make the workflow sign something, can run code on the phone of everyone
-using the app.** It is the `PARSERS_SIGNING_KEY` secret of this repository. Keep the list of people who can
-change workflows and secrets here as short as the list of people who can release the app.
+using the app.** The key is the `PARSERS_SIGNING_KEY` secret of a GitHub environment of the same name, and that
+environment can only be used by runs on `master`. A workflow on any other branch is refused it, whatever the
+workflow says. It must not also be a secret of the repository: every branch can read those.
 
-In the workflow the key is in the environment of one step, the one that signs, in a job that compiles and packs the
+So what gets signed is what is on `master`, by whoever starts the run. Keep the list of people who can push to
+`master` or change the repository's settings as short as the list of people who can release the app.
+
+In the workflow the key is handed to one step alone, the one that signs, in a job that compiles and packs the
 parsers and runs none of their code. Keep it that way: a parser is code anyone may have sent in a pull request, and
 its start-up code runs wherever a parser is made. A test or a task that makes parsers belongs in the job that has
 no secrets. See [PULL_REQUESTS.md](PULL_REQUESTS.md).
@@ -70,8 +77,15 @@ Setting it up, once:
 ./gradlew generateParsersSigningKey -PkeyFile=/somewhere/outside/the/repo/parsers-signing-key.pem
 ```
 
-- The file it writes is the private key. Paste its contents into the `PARSERS_SIGNING_KEY` secret (Settings >
-  Secrets and variables > Actions), keep a copy somewhere safe and offline, and delete the file.
+- The file it writes is the private key. It goes into a GitHub environment, in Settings > Environments:
+  - create an environment named `PARSERS_SIGNING_KEY`;
+  - under **Deployment branches and tags** choose *Selected branches and tags* and add `master`;
+  - leave **Required reviewers** unticked, or every publication waits for somebody to approve it;
+  - under **Environment secrets** add a secret named `PARSERS_SIGNING_KEY` and paste the whole file into it,
+    the `BEGIN` and `END` lines included.
+
+  Then keep a copy of the file somewhere safe and offline, and delete it. If the key was ever a secret of the
+  repository (Settings > Secrets and variables > Actions), delete that one.
 - The line it prints is the public key. It goes in two places: `parsersPublicKey` in `gradle.properties` here, so
   that a publication signed with any other key fails instead of going out, and `parsersBundlePublicKey` in the
   app's `app/build.gradle`.

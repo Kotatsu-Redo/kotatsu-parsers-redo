@@ -70,13 +70,13 @@ them can rewrite the check it has to pass.
 |---|---|---|---|
 | `pull-request.yml` | yes | read only | none |
 | `publish-parsers-bundle.yml`, checking job | what is on `master`, visiting no site | read only | none |
-| `publish-parsers-bundle.yml`, signing job | **no**: the parsers are compiled, never run | the release | the signing key |
+| `publish-parsers-bundle.yml`, signing job | **no**: the parsers are compiled, never run | the release | the signing key, on `master` only |
 
 No workflow here merges anything, and none is set off by a pull request with a token that can write (there is no
 `pull_request_target`). Merging is done by GitHub, for whoever with write access asked for it.
 
 Code of the parsers is only ever run where there is nothing to take: in the job without secrets. The job that holds
-the signing key compiles and packs them, and the key is in the environment of the signing step alone.
+the signing key compiles and packs them, and the key is handed to the signing step alone.
 
 ## Setting it up, once
 

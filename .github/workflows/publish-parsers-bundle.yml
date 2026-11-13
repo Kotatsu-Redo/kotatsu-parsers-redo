@@ -46,10 +46,15 @@ jobs:
 
   # Only what is on master, and only once the check above has passed: when that job fails, or is left out for
   # the run being on another branch, this one is left out too and nothing is published.
+  #
+  # The signing key is a secret of this environment and not of the repository. The environment is set, in the
+  # repository's settings, to be used from master alone: a copy of this workflow on another branch, with the
+  # conditions here taken out, is still refused the key. See "The key" in docs/BUNDLE.md.
   publish:
     needs: check
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    environment: PARSERS_SIGNING_KEY
     permissions:
       contents: write
     # One at a time: two of these would race for the same release assets
