@@ -6,6 +6,6 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@MangaSourceParser("ZINCHANMANGA", "ZinChanManga.Com", "en", ContentType.HENTAI)
+@MangaSourceParser("ZINCHANMANGA", "ZinChanManga.net", "en", ContentType.HENTAI)
 internal class ZinChanManga(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ZINCHANMANGA, "zinchangmanga.net", 10)
