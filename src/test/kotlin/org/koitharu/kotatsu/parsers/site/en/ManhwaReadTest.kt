@@ -430,6 +430,9 @@ internal class ManhwaReadTest {
 	private class MockContext(
 		private val handler: (Request, Int) -> Response,
 	) : MangaLoaderContext() {
+		override val parsers: org.koitharu.kotatsu.parsers.ParsersBundle
+			get() = org.koitharu.kotatsu.parsers.core.ParsersBundleImpl
+
 
 		val requests = ArrayList<Request>()
 

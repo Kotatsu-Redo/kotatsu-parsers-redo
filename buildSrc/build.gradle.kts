@@ -13,5 +13,6 @@ kotlin {
 dependencies {
     implementation(libs.korte)
     implementation(libs.simplexml)
+    implementation("org.ow2.asm:asm:9.9.1")
     implementation(libs.kotlinx.coroutines.core)
 }

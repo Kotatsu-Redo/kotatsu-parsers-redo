@@ -4,9 +4,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -18,8 +22,11 @@ import org.koitharu.kotatsu.parsers.network.UserAgents
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
+import org.koitharu.kotatsu.parsers.util.json.toJSONObjectOrNull
 import java.text.SimpleDateFormat
 import java.util.*
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 
 /**
  * LikeManga moved to mgread.io and now runs on the Init Manga WordPress theme, with other urls than the old site:
@@ -237,14 +244,26 @@ internal abstract class LikeMangaParser(
 	).parseJson()
 
 	/**
-	 * Chapters can be served encrypted, and only the site's own reader opens them. Those load in a WebView,
-	 * where that reader runs as usual, and the images are read from the page once it has decrypted them.
+	 * A chapter's images are served as an AES-encrypted piece of html in its page. The key is either handed out
+	 * by the reader's API in exchange for the grant that comes with the chapter, or derived from a passphrase
+	 * that is in the page. Should a chapter come in a form unknown here, it loads in a WebView, where the site's
+	 * own reader runs as usual, and the images are read from the page once it has decrypted them.
 	 */
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val url = chapter.url.toCurrentChapterUrl().toAbsoluteUrl(domain)
 		val doc = webClient.httpGet(url, getRequestHeaders()).parseHtml()
-		val images = doc.select("div#chapter-content > img").map { it.requireSrc() }
-			.ifEmpty { loadImagesInReader(url) }
+		if (doc.selectFirst("div.lock-card") != null) {
+			throw ParseException("This chapter takes coins and an account to read", url)
+		}
+		val scripts = doc.select("script").map { it.scriptContent() }
+		val encrypted = scripts.firstOrNull { "\"ciphertext\"" in it }
+		val elements = if (encrypted != null) {
+			val payload = JSONObject(encrypted.substring(encrypted.indexOf('{'), encrypted.lastIndexOf('}') + 1))
+			Jsoup.parseBodyFragment(decryptChapter(payload, scripts, url), url).select("img, canvas[data-enc]")
+		} else {
+			doc.select("div#chapter-content > img")
+		}
+		val images = elements.mapNotNull { it.imageUrl() }.ifEmpty { loadImagesInReader(url) }
 		return images.map { imageUrl ->
 			MangaPage(
 				id = generateUid(imageUrl),
@@ -254,6 +273,92 @@ internal abstract class LikeMangaParser(
 			)
 		}
 	}
+
+	// The reader's data is in inline scripts, or in scripts with a base64 data url
+	private fun Element.scriptContent(): String = attr("src").substringAfter("base64,", "").nullIfEmpty()
+		?.let { context.decodeBase64(it).toString(Charsets.UTF_8) }
+		?: data()
+
+	private suspend fun decryptChapter(payload: JSONObject, scripts: List<String>, chapterUrl: String): String {
+		val salt = payload.optString("salt").nullIfEmpty()
+		if (salt != null) {
+			val passphrase = scripts.firstNotNullOfOrNull { PASSPHRASE_REGEX.find(it)?.groupValues?.get(1) }
+				?: throw ParseException("Cannot find the chapter's passphrase", chapterUrl)
+			val spec = PBEKeySpec(
+				context.decodeBase64(passphrase).toString(Charsets.UTF_8).toCharArray(),
+				salt.hexToBytes(),
+				999,
+				256,
+			)
+			return payload.decrypt(SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512").generateSecret(spec).encoded)
+		}
+		var current = payload
+		var response = requestChapterKey(current, chapterUrl)
+		if (response.optString("code") == "imc_stale_page") {
+			// The page was served from a cache with a grant that has expired since, the site gives out a new one
+			val request = JSONObject().put("chapter_id", current.get("cid"))
+			current = postToReaderApi("chapter-payload", request, chapterUrl).optJSONObject("payload") ?: current
+			response = requestChapterKey(current, chapterUrl)
+		}
+		val key = response.optString("key").nullIfEmpty()
+		if (key != null) {
+			return current.decrypt(key.hexToBytes())
+		}
+		val message = response.optString("message").nullIfEmpty() ?: "Cannot get the chapter's key"
+		if (response.optString("code") == "imc_challenge_required") {
+			// After many chapters in a short time the site wants its "Load chapter" button pressed before it gives
+			// out more keys. That is for whoever is reading to do, on the site
+			try {
+				context.requestBrowserAction(this, chapterUrl)
+			} catch (e: UnsupportedOperationException) {
+				throw ParseException(message, chapterUrl, e)
+			}
+		}
+		throw ParseException(message, chapterUrl)
+	}
+
+	private fun JSONObject.decrypt(key: ByteArray): String = CryptoAES(context).decrypt(
+		cipherText = getString("ciphertext"),
+		keyBytes = key,
+		ivBytes = getString("iv").hexToBytes(),
+	)
+
+	private suspend fun requestChapterKey(payload: JSONObject, chapterUrl: String): JSONObject = postToReaderApi(
+		endpoint = "chapter-key",
+		body = JSONObject()
+			.put("chapter_id", payload.get("cid"))
+			.put("epoch", payload.get("e"))
+			.put("grant", payload.get("g")),
+		chapterUrl = chapterUrl,
+	)
+
+	// The reader's API says what it wants in the body of an error response, which is to be read as well
+	private suspend fun postToReaderApi(endpoint: String, body: JSONObject, chapterUrl: String): JSONObject {
+		val request = Request.Builder()
+			.url("https://$domain/wp-json/initmanga/v1/$endpoint")
+			.post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+			.headers(getRequestHeaders())
+			.header("Referer", chapterUrl)
+			.header("Origin", "https://$domain")
+			.tag(MangaSource::class.java, source)
+			.build()
+		return context.httpClient.newCall(request).await().use { response ->
+			response.body.string().toJSONObjectOrNull()
+				?: throw HttpStatusException(response.message, response.code, request.url.toString())
+		}
+	}
+
+	// Images further down the page keep their url in an attribute until they are scrolled to,
+	// and a canvas holds its url base64-encoded and reversed
+	private fun Element.imageUrl(): String? = if (tagName() == "canvas") {
+		context.decodeBase64(attr("data-enc")).reversedArray().toString(Charsets.UTF_8).nullIfEmpty()
+	} else {
+		attrAsAbsoluteUrlOrNull("data-original-src")
+			?: attrAsAbsoluteUrlOrNull("data-src")
+			?: attrAsAbsoluteUrlOrNull("src")
+	}
+
+	private fun String.hexToBytes(): ByteArray = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
 	private suspend fun loadImagesInReader(url: String): List<String> {
 		val raw = context.evaluateJs(url, READER_IMAGES_SCRIPT, READER_TIMEOUT_MS)
@@ -290,6 +395,7 @@ internal abstract class LikeMangaParser(
 			})()
 		"""
 		val POST_ID_REGEX = Regex("""postid-(\d+)""")
+		val PASSPHRASE_REGEX = Regex(""""decryption_key"\s*:\s*"([^"]+)"""")
 		val LEGACY_MANGA_URL_REGEX = Regex("""/([^/]+)-\d+/?""")
 		val LEGACY_CHAPTER_URL_REGEX = Regex("""/([^/]+)-\d+/(chapter-[^/-]+)(?:-[^/]*)?/?""")
 	}

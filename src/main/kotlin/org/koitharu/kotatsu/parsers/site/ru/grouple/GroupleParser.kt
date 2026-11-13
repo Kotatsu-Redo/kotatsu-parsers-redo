@@ -321,7 +321,7 @@ internal abstract class GroupleParser(
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-        if (chapter.source != source && chapter.source is MangaParserSource) { // handle redirects between websites
+        if (chapter.source != source && chapter.source is ParserMangaSource) { // handle redirects between websites
             return context.newParserInstance(chapter.source).getPages(chapter)
         }
         val url = chapter.url.toAbsoluteUrl(domain).toHttpUrl().newBuilder().setQueryParameter("mtr", "1").build()

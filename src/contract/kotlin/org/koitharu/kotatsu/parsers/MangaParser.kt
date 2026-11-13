@@ -1,21 +1,17 @@
 package org.koitharu.kotatsu.parsers
 
 import okhttp3.Headers
-import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.model.search.MangaSearchQuery
 import org.koitharu.kotatsu.parsers.model.search.MangaSearchQueryCapabilities
-import org.koitharu.kotatsu.parsers.util.LinkResolver
-import org.koitharu.kotatsu.parsers.util.convertToMangaSearchQuery
-import org.koitharu.kotatsu.parsers.util.toMangaListFilterCapabilities
 import java.util.*
 
 public interface MangaParser : Interceptor {
 
-	public val source: MangaParserSource
+	public val source: ParserMangaSource
 
 	/**
 	 * Supported [SortOrder] variants. Must not be empty.
@@ -32,7 +28,6 @@ public interface MangaParser : Interceptor {
 	public val config: MangaSourceConfig
 
 	public val authorizationProvider: MangaParserAuthProvider?
-		get() = this as? MangaParserAuthProvider
 
 	/**
 	 * Provide default domain and available alternatives, if any.
@@ -78,11 +73,4 @@ public interface MangaParser : Interceptor {
 	public suspend fun getRelatedManga(seed: Manga): List<Manga>
 
 	public fun getRequestHeaders(): Headers
-
-	/**
-	 * Return [Manga] object by web link to it
-	 * @see [Manga.publicUrl]
-	 */
-	@InternalParsersApi
-	public suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga?
 }

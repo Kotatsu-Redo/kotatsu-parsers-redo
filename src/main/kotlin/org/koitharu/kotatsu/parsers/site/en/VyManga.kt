@@ -4,17 +4,21 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * The site left vymanga.net, which now redirects to a directory of manga sites, for mangavyvy.net and its mirror.
+ */
 @MangaSourceParser("VYMANGA", "VyManga", "en")
 internal class VyManga(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.VYMANGA, pageSize = 36) {
 
-	override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain("vymanga.net")
+	override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain("mangavyvy.net", "mangavyvy.com")
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -123,7 +127,7 @@ internal class VyManga(context: MangaLoaderContext) :
 		return doc.select("#advance-search .check-genre .d-flex").mapToSet {
 			MangaTag(
 				key = it.selectFirstOrThrow(".checkbox-genre").attr("data-value"),
-				title = it.selectFirstOrThrow("label").text(),
+				title = it.selectFirstOrThrow("label").text().toTitleCase(sourceLocale),
 				source = source,
 			)
 		}
@@ -132,11 +136,19 @@ internal class VyManga(context: MangaLoaderContext) :
 	override suspend fun getDetails(manga: Manga): Manga {
 		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
 		val simpleDateFormat = SimpleDateFormat("MMM dd, yyy", sourceLocale)
+		val title = doc.selectFirst("h1.title")?.textOrNull() ?: manga.title
+		val rating = ratingRegex.find(doc.selectFirst("div.col-md-7 p:contains(Rating)")?.text().orEmpty())
 		return manga.copy(
+			title = title,
+			altTitles = doc.selectFirst("h1.title + p:not(.text-info)")?.text().orEmpty().split(',', ';')
+				.mapNotNullToSet { name -> name.trim().takeUnless { it.isEmpty() || it == "None" || it == title } },
+			coverUrl = doc.selectFirst(".img-manga img")?.src() ?: manga.coverUrl,
+			authors = doc.select("div.col-md-7 p:has(.pre-title:contains(Author)) a")
+				.mapNotNullToSet { it.textOrNull() },
 			tags = doc.select("div.col-md-7 p a[href*=genre]").mapToSet { a ->
 				MangaTag(
 					key = a.attr("href").substringAfterLast('/'),
-					title = a.text(),
+					title = a.text().toTitleCase(sourceLocale),
 					source = source,
 				)
 			},
@@ -146,20 +158,26 @@ internal class VyManga(context: MangaLoaderContext) :
 				"completed" -> MangaState.FINISHED
 				else -> null
 			},
-			rating = doc.selectFirst("div.col-md-7 p:contains(Rating)")?.text()?.substringAfterLast(':')
-				?.substringBefore('/')?.toFloat() ?: RATING_UNKNOWN,
+			// "8.5/10 (120 votes)", and 0/10 while nobody has voted
+			rating = rating?.takeIf { it.groupValues[2] != "0" }?.groupValues?.get(1)?.toFloatOrNull()?.div(10f)
+				?: RATING_UNKNOWN,
 			chapters = doc.select("div.list div.list-group a").mapChapters(reversed = true) { i, a ->
-				val url = a.attrAsRelativeUrl("href")
+				// A chapter's link leads to another site and only works for a few hours, so a chapter is
+				// known by its place in the list of its manga, where a new link is taken when it is read
+				val chapterId = a.id().nullIfEmpty() ?: return@mapChapters null
+				val url = "${manga.url.substringBefore('#')}#$chapterId"
+				val info = a.selectFirst("p")
 				MangaChapter(
 					id = generateUid(url),
 					title = a.selectFirst("span")?.textOrNull(),
-					number = i + 1f,
+					number = chapterId.substringAfter("chapter-").toFloatOrNull() ?: (i + 1f),
 					volume = 0,
 					url = url,
-					scanlator = null,
+					scanlator = info?.selectFirst("span.font-weight-bold")?.textOrNull(),
 					uploadDate = parseChapterDate(
 						simpleDateFormat,
-						a.selectFirst("p")?.text(),
+						// "Uploaded by <span>name</span> date" on chapters uploaded by a user
+						info?.textNodes()?.lastOrNull()?.text()?.trim()?.nullIfEmpty() ?: info?.text(),
 					),
 					branch = null,
 					source = source,
@@ -167,6 +185,8 @@ internal class VyManga(context: MangaLoaderContext) :
 			},
 		)
 	}
+
+	private val ratingRegex = Regex("""([\d.]+)/10 \(([\d,]+) votes?\)""")
 
 	private fun parseChapterDate(dateFormat: DateFormat, date: String?): Long {
 		val d = date?.lowercase() ?: return 0
@@ -192,7 +212,16 @@ internal class VyManga(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
+		val chapterId = chapter.url.substringAfter('#', "")
+		val chapterUrl = if (chapterId.isEmpty()) {
+			// A chapter saved before the site moved holds its link
+			chapter.url.toAbsoluteUrl(domain)
+		} else {
+			val mangaUrl = chapter.url.substringBefore('#').toAbsoluteUrl(domain)
+			webClient.httpGet(mangaUrl).parseHtml().getElementById(chapterId)?.attrAsAbsoluteUrlOrNull("href")
+				?: throw ParseException("This chapter is no longer listed, refresh the chapters", mangaUrl)
+		}
+		val doc = webClient.httpGet(chapterUrl).parseHtml()
 		return doc.select("img.d-block").map { img ->
 			val url = img.requireSrc()
 			MangaPage(

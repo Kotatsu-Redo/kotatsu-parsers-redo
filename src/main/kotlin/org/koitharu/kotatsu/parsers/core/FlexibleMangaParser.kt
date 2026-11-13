@@ -8,6 +8,7 @@ import okhttp3.Response
 import org.koitharu.kotatsu.parsers.InternalParsersApi
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
+import org.koitharu.kotatsu.parsers.MangaParserAuthProvider
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
 import org.koitharu.kotatsu.parsers.model.*
@@ -23,6 +24,9 @@ internal abstract class FlexibleMangaParser @InternalParsersApi constructor(
 ) : MangaParser {
 
 	override val config: MangaSourceConfig by lazy { context.getConfig(source) }
+
+	override val authorizationProvider: MangaParserAuthProvider?
+		get() = this as? MangaParserAuthProvider
 
 	open val sourceLocale: Locale
 		get() = if (source.locale.isEmpty()) Locale.ROOT else Locale(source.locale)
@@ -88,7 +92,7 @@ internal abstract class FlexibleMangaParser @InternalParsersApi constructor(
 	 * Return [Manga] object by web link to it
 	 * @see [Manga.publicUrl]
 	 */
-	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? = null
+	open suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? = null
 
 	override fun intercept(chain: Interceptor.Chain): Response = chain.proceed(chain.request())
 }

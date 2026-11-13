@@ -1,9 +1,6 @@
-package org.koitharu.kotatsu.core.parser
+package org.koitharu.kotatsu.parsers.util
 
 import org.jsoup.nodes.Element
-import org.koitharu.kotatsu.parsers.util.attrOrNull
-import org.koitharu.kotatsu.parsers.util.nullIfEmpty
-import org.koitharu.kotatsu.parsers.util.splitByWhitespace
 
 /**
  * Utility class for parsing the `background` property of css

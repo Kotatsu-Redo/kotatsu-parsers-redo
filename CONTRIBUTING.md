@@ -85,10 +85,20 @@ create a Pull Request.
 
 It is recommended that unit tests be run before submitting a PR.
 
-- Temporary modify the `MangaSources` annotation class: specify your parser(s) name(s) and change mode
-  to `EnumSource.Mode.INCLUDE`
+- Temporary put your parser(s) name(s) in `names`, in `MangaSources.kt`
 - Run the `MangaParserTest` (`gradlew :test --tests "org.koitharu.kotatsu.parsers.MangaParserTest"`)
 - Optionally, you can run the `generateTestsReport` gradle task to get a pretty readable html report from test results.
+
+### What a parser can use
+
+Parsers are also published on their own, for the apps already installed to take in without being updated: see
+[docs/BUNDLE.md](docs/BUNDLE.md). Two things follow for the code of a parser:
+
+- It runs on Android, which lacks parts of the JDK and has an older `org.json`. `gradlew checkParsersBundle` (needs the
+  Android SDK) fails on whatever a parser uses that is not there. It runs on every pull request.
+- What is under `src/contract` (the models, `MangaParser`, `MangaLoaderContext`, the exceptions) is inside the installed
+  apps and cannot be changed for them. A fix belongs in `src/main`. If it truly needs a change there, say so in the
+  pull request.
 
 ## Help
 

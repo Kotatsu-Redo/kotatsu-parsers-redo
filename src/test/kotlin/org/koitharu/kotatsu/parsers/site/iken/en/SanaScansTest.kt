@@ -124,6 +124,9 @@ internal class SanaScansTest {
 	private class TestContext(
 		private val responder: (path: String) -> String,
 	) : MangaLoaderContext() {
+		override val parsers: org.koitharu.kotatsu.parsers.ParsersBundle
+			get() = org.koitharu.kotatsu.parsers.core.ParsersBundleImpl
+
 		override val cookieJar: CookieJar = CookieJar.NO_COOKIES
 		override val httpClient: OkHttpClient = OkHttpClient.Builder()
 			.addInterceptor { chain ->

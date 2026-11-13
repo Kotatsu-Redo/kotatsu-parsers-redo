@@ -244,7 +244,7 @@ internal class MangaParserTest {
 	fun link(source: MangaParserSource) = runTest(timeout = timeout) {
 		val parser = context.newParserInstance(source)
 		val manga = parser.getList(MangaSearchQuery.Builder().build()).first()
-		val resolved = context.newLinkResolver(manga.publicUrl).getManga()
+		val resolved = context.resolveLink(manga.publicUrl)
 		Assertions.assertNotNull(resolved)
 		resolved ?: return@runTest
 		Assertions.assertEquals(manga.id, resolved.id)

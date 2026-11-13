@@ -1,7 +1,5 @@
 package org.koitharu.kotatsu.parsers.model
 
-import org.koitharu.kotatsu.parsers.util.formatSimple
-import org.koitharu.kotatsu.parsers.util.ifNullOrEmpty
 
 public data class MangaChapter(
 	/**
@@ -44,17 +42,24 @@ public data class MangaChapter(
 
 	@Deprecated("Use title instead", ReplaceWith("title"))
 	val name: String
-		get() = title.ifNullOrEmpty {
+		get() = if (title.isNullOrEmpty()) {
 			buildString {
 				if (volume > 0) append("Vol ").append(volume).append(' ')
-				if (number > 0) append("Chapter ").append(number.formatSimple()) else append("Unnamed")
+				if (number > 0) append("Chapter ").append(formatNumber()) else append("Unnamed")
 			}
+		} else {
+			title
 		}
 
 	public fun numberString(): String? = if (number > 0f) {
-		number.formatSimple()
+		formatNumber()
 	} else {
 		null
+	}
+
+	private fun formatNumber(): String {
+		val raw = number.toString()
+		return if (raw.endsWith(".0") || raw.endsWith(",0")) raw.dropLast(2) else raw
 	}
 
 	public fun volumeString(): String? = if (volume > 0) {

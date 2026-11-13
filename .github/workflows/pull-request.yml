@@ -1,0 +1,115 @@
+name: Pull request
+
+# For every pull request to master: the sources it changes are tested against their sites, and the parsers are
+# checked for still fitting the apps already installed. These are the checks master requires: once a maintainer
+# has read a pull request and told GitHub to merge it when they pass, it is merged the moment they do. See
+# docs/PULL_REQUESTS.md.
+#
+# It runs code written by whoever opened the pull request, so it is given nothing worth taking: no secrets, a
+# token that can only read, and a cache it cannot write to. Nothing here publishes, signs or merges anything,
+# and no workflow of this repository merges a pull request: that is GitHub's doing, on a maintainer's word.
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pull-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Said outright: only then does a step stop when a command in the middle of a pipe fails
+    shell: bash
+
+jobs:
+  tests:
+    name: Parser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pull request as it would be once merged, with the history needed to tell what it changes
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          cache-read-only: true
+
+      # What is checked out is the merge of the pull request into master: the commit before it on that side is master as it was
+      - name: Choose the sources to test
+        id: select
+        run: |
+          ./gradlew selectParserTests "-PcomparedWith=HEAD~1"
+          echo "sources=$(cat build/parsersTests/sources.txt)" >> "$GITHUB_OUTPUT"
+
+      # A failing test does not fail this step: what the failures amount to is decided in the next ones
+      - name: Test them against their sites
+        if: steps.select.outputs.sources != ''
+        env:
+          SOURCES: ${{ steps.select.outputs.sources }}
+        run: ./gradlew test --tests 'org.koitharu.kotatsu.parsers.MangaParserTest' "-PtestSources=$SOURCES"
+
+      - name: Sum up
+        id: summary
+        run: |
+          ./gradlew summarizeParserTests
+          cat build/parsersTests/summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "verdict=$(cat build/parsersTests/verdict.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: parser-test-results
+          path: |
+            build/parsersTests
+            build/test-results/test
+          if-no-files-found: ignore
+          overwrite: true
+
+      # Green only when everything that was tested passed. A failing source, one that Cloudflare kept from being
+      # tested, or a change no test covers is for a person to look at: the pull request can still be merged by hand
+      - name: Say whether this can be merged as it is
+        env:
+          VERDICT: ${{ steps.summary.outputs.verdict }}
+        run: |
+          case "$VERDICT" in
+            passed | nothing)
+              echo "Nothing stands in the way of merging this."
+              ;;
+            *)
+              echo "::error::The tests do not vouch for this pull request (verdict: ${VERDICT:-none}). See the summary of this run."
+              exit 1
+              ;;
+          esac
+
+  bundle:
+    name: Parsers bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          cache-read-only: true
+
+      # What "Publish parsers bundle" would refuse, found here and not on the day of publishing
+      - run: ./gradlew test --tests '*ParsersBundleTest' checkParsersBundle

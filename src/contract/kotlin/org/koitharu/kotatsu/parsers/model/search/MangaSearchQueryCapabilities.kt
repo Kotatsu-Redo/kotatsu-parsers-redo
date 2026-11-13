@@ -1,8 +1,8 @@
 package org.koitharu.kotatsu.parsers.model.search
 
 import androidx.collection.ArraySet
+import org.koitharu.kotatsu.parsers.InternalParsersApi
 import org.koitharu.kotatsu.parsers.model.search.QueryCriteria.*
-import org.koitharu.kotatsu.parsers.util.mapToSet
 
 @Deprecated("Too complex. Use MangaListFilterCapabilities instead")
 @ExposedCopyVisibility
@@ -12,9 +12,10 @@ public data class MangaSearchQueryCapabilities internal constructor(
 
 	public constructor(vararg capabilities: SearchCapability) : this(ArraySet(capabilities))
 
-	internal fun validate(query: MangaSearchQuery) {
-		val strictFields = capabilities.filter { it.isExclusive }.mapToSet { it.field }
-		val usedStrictFields = query.criteria.mapToSet { it.field }.intersect(strictFields)
+	@InternalParsersApi
+	public fun validate(query: MangaSearchQuery) {
+		val strictFields = capabilities.filter { it.isExclusive }.mapTo(HashSet()) { it.field }
+		val usedStrictFields = query.criteria.mapTo(HashSet()) { it.field }.intersect(strictFields)
 
 		require(usedStrictFields.isEmpty() || query.criteria.size <= 1) {
 			"Query contains multiple criteria, but at least one field (${usedStrictFields.joinToString()}) does not support multiple criteria."

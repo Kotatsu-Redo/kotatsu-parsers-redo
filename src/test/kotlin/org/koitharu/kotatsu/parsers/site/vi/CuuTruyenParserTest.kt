@@ -165,6 +165,9 @@ internal class CuuTruyenParserTest {
 	}
 
 	private class TestContext(val body: (Request) -> String) : MangaLoaderContext() {
+		override val parsers: org.koitharu.kotatsu.parsers.ParsersBundle
+			get() = org.koitharu.kotatsu.parsers.core.ParsersBundleImpl
+
 		val requests = mutableListOf<Request>()
 		var redraws = 0
 		override val cookieJar = CookieJar.NO_COOKIES

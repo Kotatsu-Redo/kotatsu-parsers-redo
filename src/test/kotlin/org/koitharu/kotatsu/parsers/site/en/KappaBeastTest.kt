@@ -122,6 +122,9 @@ internal class KappaBeastTest {
 	private class TestContext(
 		private val responder: (url: HttpUrl) -> String,
 	) : MangaLoaderContext() {
+		override val parsers: org.koitharu.kotatsu.parsers.ParsersBundle
+			get() = org.koitharu.kotatsu.parsers.core.ParsersBundleImpl
+
 		override val cookieJar: CookieJar = CookieJar.NO_COOKIES
 		override val httpClient: OkHttpClient = OkHttpClient.Builder()
 			.addInterceptor { chain ->

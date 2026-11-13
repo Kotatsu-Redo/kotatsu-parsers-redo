@@ -138,6 +138,9 @@ internal class GocTruyenSessionTest {
 	}
 
 	private class SessionContext(status: (Request) -> Int) : MangaLoaderContext() {
+		override val parsers: org.koitharu.kotatsu.parsers.ParsersBundle
+			get() = org.koitharu.kotatsu.parsers.core.ParsersBundleImpl
+
 		val requests = mutableListOf<Request>()
 		var captures = 0
 		var browserAvailable = true

@@ -1,8 +1,6 @@
 package org.koitharu.kotatsu.parsers.model
 
 import androidx.collection.ArrayMap
-import org.koitharu.kotatsu.parsers.util.findById
-import org.koitharu.kotatsu.parsers.util.nullIfEmpty
 
 public data class Manga(
 	/**
@@ -140,17 +138,17 @@ public data class Manga(
 	) : this(
 		id = id,
 		title = title,
-		altTitles = setOfNotNull(altTitle?.nullIfEmpty()),
+		altTitles = setOfNotNull(altTitle?.takeUnless { it.isEmpty() }),
 		url = url,
 		publicUrl = publicUrl,
 		rating = rating,
 		contentRating = if (isNsfw) ContentRating.ADULT else null,
-		coverUrl = coverUrl?.nullIfEmpty(),
+		coverUrl = coverUrl?.takeUnless { it.isEmpty() },
 		tags = tags,
 		state = state,
 		authors = setOfNotNull(author),
-		largeCoverUrl = largeCoverUrl?.nullIfEmpty(),
-		description = description?.nullIfEmpty(),
+		largeCoverUrl = largeCoverUrl?.takeUnless { it.isEmpty() },
+		description = description?.takeUnless { it.isEmpty() },
 		chapters = chapters,
 		source = source,
 	)
@@ -184,7 +182,7 @@ public data class Manga(
 		return chapters?.filter { x -> x.branch == branch }.orEmpty()
 	}
 
-	public fun findChapterById(id: Long): MangaChapter? = chapters?.findById(id)
+	public fun findChapterById(id: Long): MangaChapter? = chapters?.find { x -> x.id == id }
 
 	public fun requireChapterById(id: Long): MangaChapter = findChapterById(id)
 		?: throw NoSuchElementException("Chapter with id $id not found")

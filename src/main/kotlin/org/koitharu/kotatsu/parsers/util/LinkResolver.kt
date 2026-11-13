@@ -3,11 +3,15 @@ package org.koitharu.kotatsu.parsers.util
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaParser
 import org.koitharu.kotatsu.parsers.core.AbstractMangaParser
+import org.koitharu.kotatsu.parsers.core.FlexibleMangaParser
 import org.koitharu.kotatsu.parsers.model.*
+import org.koitharu.kotatsu.parsers.newParser
+import org.koitharu.kotatsu.parsers.newRawParser
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import java.util.Locale
 
@@ -26,9 +30,19 @@ public class LinkResolver internal constructor(
 		// Several sources may share a domain (locales of one site, legacy parsers).
 		// Every equally ranked source gets a chance to claim the link before falling back.
 		for (candidate in ranked.takeWhile { it.score == best.score }) {
-			context.newParserInstance(candidate.source).resolveLink(this, link)?.let { return it }
+			candidate.source.newRawParser(context).resolveLinkOrNull()?.let { return it }
 		}
-		return resolveManga(context.newParserInstance(best.source))
+		return resolveManga(best.source.newParser(context))
+	}
+
+	/**
+	 * Asked of the parser as its class makes it: what an application is handed has this taken out of it, being of use
+	 * to nothing but this class.
+	 */
+	private suspend fun MangaParser.resolveLinkOrNull(): Manga? = when (this) {
+		is AbstractMangaParser -> resolveLink(this@LinkResolver, link)
+		is FlexibleMangaParser -> resolveLink(this@LinkResolver, link)
+		else -> null
 	}
 
 	/**
@@ -44,7 +58,7 @@ public class LinkResolver internal constructor(
 		val localeHints = localeHints()
 		val matches = ArrayList<Candidate>()
 		for (s in MangaParserSource.entries) {
-			val presets = context.newParserInstance(s).configKeyDomain.presetValues
+			val presets = s.newRawParser(context).configKeyDomain.presetValues
 			var score = when {
 				presets.any { it.removePrefix("www.") == host } -> 4
 				topDomain != null && topDomain in presets -> 0
@@ -162,3 +176,7 @@ public class LinkResolver internal constructor(
 		val ISO_LANGUAGES: Set<String> = Locale.getISOLanguages().toHashSet()
 	}
 }
+
+internal fun MangaLoaderContext.newLinkResolver(link: HttpUrl): LinkResolver = LinkResolver(this, link)
+
+internal fun MangaLoaderContext.newLinkResolver(link: String): LinkResolver = newLinkResolver(link.toHttpUrl())

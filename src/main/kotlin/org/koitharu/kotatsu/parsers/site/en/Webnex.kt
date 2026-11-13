@@ -3,18 +3,21 @@ package org.koitharu.kotatsu.parsers.site.en
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import okhttp3.Headers.Companion.headersOf
 import okhttp3.HttpUrl
 import okhttp3.Response
+import org.json.JSONObject
+import org.json.JSONTokener
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import org.koitharu.kotatsu.parsers.exception.ParseException
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.asTypedList
+import org.koitharu.kotatsu.parsers.util.json.toJSONObjectOrNull
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -190,15 +193,16 @@ internal class Webnex(context: MangaLoaderContext) :
 		}
 		val title = doc.selectFirstOrThrow("h1.series-title").text()
 		val credits = doc.select(".series-credits a[href*=author=], .series-credits a[href*=artist=]")
-		val facts = doc.select(".series-facts > span").eachText().map { it.lowercase(Locale.ROOT) }
+		// Status, type, year, original language, demographic, and the content rating when it isn't safe
+		val facts = doc.select(".series-badges > li").eachText().map { it.lowercase(Locale.ROOT) }
 		return manga.copy(
 			title = title,
-			altTitles = (doc.select(".series-native, details.series-more li").eachText() - title).toSet(),
-			coverUrl = doc.selectFirst(".series-cover img")?.src() ?: manga.coverUrl,
+			altTitles = doc.select(".series-alt-name").eachText().filterTo(LinkedHashSet()) { it != title },
+			coverUrl = doc.selectFirst(".series-top-cover img")?.src() ?: manga.coverUrl,
 			description = doc.selectFirst(".series-desc")?.html().orEmpty(),
 			authors = credits.eachText().toSet(),
 			tags = parseTags(doc),
-			state = when (doc.selectFirst(".fact-status")?.text()?.lowercase(Locale.ROOT)) {
+			state = when (doc.selectFirst(".series-badges li:has(.dot)")?.text()?.lowercase(Locale.ROOT)) {
 				"ongoing" -> MangaState.ONGOING
 				"completed" -> MangaState.FINISHED
 				"hiatus" -> MangaState.PAUSED
@@ -211,8 +215,8 @@ internal class Webnex(context: MangaLoaderContext) :
 				"safe" in facts -> ContentRating.SAFE
 				else -> manga.contentRating
 			},
-			rating = doc.selectFirst(".series-numbers a.series-number-link")?.text()?.toFloatOrNull()
-				?.div(10f) ?: RATING_UNKNOWN,
+			// Out of 10, and a dash while nobody has rated the series
+			rating = doc.selectFirst(".cover-score strong")?.text()?.toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN,
 			// The site lists the newest chapter first
 			chapters = (listOf(doc) + otherPages).flatMap(::parseChapters).distinctBy { it.url }.asReversed(),
 		)
@@ -241,16 +245,18 @@ internal class Webnex(context: MangaLoaderContext) :
 		// Hidden rows are decoys that the site's own page never shows
 		return doc.select("li.ch-row:not([aria-hidden=true]):not([style*=display:none])").flatMap { row ->
 			val link = row.selectFirstOrThrow("a.ch-link")
-			val numberElement = link.selectFirst(".ch-num")
 			val titleElement = link.selectFirst(".ch-title")
+			// The number comes after "Ch. " for the eye and "Chapter " for a screen reader, both in the same element
+			val numberText = link.selectFirst(".ch-num")?.ownText()?.trim().orEmpty()
+			val name = titleElement?.text()?.nullIfEmpty()
 			val title = when {
-				titleElement == null -> numberElement?.text()
-				titleElement.hasClass("is-plain") -> titleElement.text()
-				else -> listOfNotNull(numberElement?.text()?.nullIfEmpty(), titleElement.text()).joinToString(": ")
+				numberText.isEmpty() || titleElement?.hasClass("is-plain") == true -> name
+				name == null -> "Chapter $numberText"
+				else -> "Chapter $numberText: $name"
 			}
-			val number = numberElement?.ownText()?.toFloatOrNull() ?: 0f
+			val number = numberText.toFloatOrNull() ?: 0f
 			val picked = newChapter(
-				url = link.attrAsRelativeUrl("href"),
+				href = link.attrAsRelativeUrl("href"),
 				title = title,
 				number = number,
 				group = row.selectFirst(".ch-source, .ch-source-name")?.text(),
@@ -258,7 +264,7 @@ internal class Webnex(context: MangaLoaderContext) :
 			)
 			val others = row.select(".ch-sources-menu a.ch-sources-item").map { item ->
 				newChapter(
-					url = item.attrAsRelativeUrl("href"),
+					href = item.attrAsRelativeUrl("href"),
 					title = title,
 					number = number,
 					group = item.selectFirst(".ch-sources-name")?.text(),
@@ -269,17 +275,22 @@ internal class Webnex(context: MangaLoaderContext) :
 		}
 	}
 
-	private fun newChapter(url: String, title: String?, number: Float, group: String?, date: Long) = MangaChapter(
-		id = generateUid(url),
-		title = title,
-		number = number,
-		volume = 0,
-		url = url,
-		scanlator = group,
-		uploadDate = date,
-		branch = group,
-		source = source,
-	)
+	private fun newChapter(href: String, title: String?, number: Float, group: String?, date: Long): MangaChapter {
+		// After a chapter of some group was read, the site adds "?group=" to every link of the series, for its reader
+		// to go on with that group. The same upload must stay the same chapter whether it is there or not.
+		val url = href.substringBefore('?')
+		return MangaChapter(
+			id = generateUid(url),
+			title = title,
+			number = number,
+			volume = 0,
+			url = url,
+			scanlator = group,
+			uploadDate = date,
+			branch = group,
+			source = source,
+		)
+	}
 
 	// The dropdown only has a relative time ("4w ago")
 	private fun parseTimeAgo(item: Element): Long {
@@ -295,13 +306,22 @@ internal class Webnex(context: MangaLoaderContext) :
 		return System.currentTimeMillis() - (match.groupValues[1].toInt() * days * TimeUnit.DAYS.toMillis(1)).toLong()
 	}
 
+	// The site gives a chapter's page list to its reader in a browser only, and answers anything else with
+	// "Open this chapter on webnex.cc to read". So the chapter is opened in a browser, where the list is asked for.
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		// The reader page sets a cookie for its own path, which the page list asks for along with a Referer
-		val readerUrl = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).use { response ->
-			response.request.url.newBuilder().query(null).build().toString()
+		val readerUrl = chapter.url.toAbsoluteUrl(domain)
+		val raw = context.evaluateJs(readerUrl, READER_PAGES_SCRIPT, READER_TIMEOUT_MS)
+			?: throw ParseException("The chapter did not open in the browser in time", readerUrl)
+		// A string from a WebView arrives JSON-quoted
+		val answer = JSONObject(JSONTokener(raw).nextValue() as? String ?: raw)
+		val body = answer.optString("body").toJSONObjectOrNull()
+		val pages = body?.optJSONArray("pages")?.asTypedList<String>().orEmpty()
+		if (pages.isEmpty()) {
+			val message = body?.optString("message")?.nullIfEmpty()
+				?: answer.optString("error").nullIfEmpty()
+				?: "The site gave no pages for this chapter (HTTP ${answer.optInt("status")})"
+			throw ParseException(message, readerUrl)
 		}
-		val pages = webClient.httpGet("$readerUrl/pages", headersOf("Referer", readerUrl)).parseJson()
-			.getJSONArray("pages").asTypedList<String>()
 		return pages.mapIndexed { index, url ->
 			MangaPage(
 				// The image links change on every load
@@ -324,6 +344,27 @@ internal class Webnex(context: MangaLoaderContext) :
 	}
 
 	private companion object {
+
+		const val READER_TIMEOUT_MS = 30_000L
+
+		// Runs repeatedly until it returns something. The reader showing a page tells that the site has let this
+		// browser in, which is when its page list can be asked for; the wait is for a reader that looks different.
+		const val READER_PAGES_SCRIPT = """
+			(() => {
+				if (!location.pathname.startsWith('/read/')) return null;
+				const state = window.__kotatsuReader || (window.__kotatsuReader = { since: Date.now() });
+				if (!state.asked && (document.querySelector('.reader-page img') || Date.now() - state.since > 10000)) {
+					state.asked = true;
+					const pagesUrl = document.documentElement.innerHTML.match(/pagesUrl\\?":\\?"([^"\\]+)/);
+					fetch(pagesUrl ? pagesUrl[1] : location.pathname + '/pages')
+						.then((response) => response.text()
+							.then((body) => JSON.stringify({ status: response.status, body: body })))
+						.catch((error) => JSON.stringify({ error: String(error) }))
+						.then((answer) => { state.answer = answer; });
+				}
+				return state.answer || null;
+			})()
+		"""
 
 		val TITLE_DISAMBIGUATION = Regex("""\s*\(\d{4}(\s*·[^)]*)?\)\s*$""")
 		val TIME_AGO = Regex("""(\d+)(mo|y|w|d|h|m) ago""")

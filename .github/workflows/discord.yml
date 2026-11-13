@@ -5,6 +5,10 @@ on:
     branches:
       - '**'
 
+# The action is somebody else's code. It is given the webhook and nothing of this repository: no token to read
+# or write it with
+permissions: {}
+
 jobs:
   discordNotification:
     runs-on: ubuntu-latest

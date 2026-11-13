@@ -7,11 +7,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import org.koitharu.kotatsu.parsers.bitmap.Bitmap
 import org.koitharu.kotatsu.parsers.config.MangaSourceConfig
-import org.koitharu.kotatsu.parsers.model.MangaParserSource
+import org.koitharu.kotatsu.parsers.model.Manga
+import org.koitharu.kotatsu.parsers.model.ParserMangaSource
 import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.webview.InterceptedRequest
 import org.koitharu.kotatsu.parsers.webview.InterceptionConfig
-import org.koitharu.kotatsu.parsers.util.LinkResolver
 import java.util.*
 
 public abstract class MangaLoaderContext {
@@ -20,11 +20,24 @@ public abstract class MangaLoaderContext {
 
 	public abstract val cookieJar: CookieJar
 
-	public fun newParserInstance(source: MangaParserSource): MangaParser = source.newParser(this)
+	/**
+	 * The parsers this context is working with.
+	 *
+	 * An application holds a copy of them, which is what it starts with, and may put a newer one in its place while it
+	 * runs. Everything that needs a parser or the list of sources goes through here for that reason, and never to the
+	 * copy it was compiled with.
+	 */
+	public abstract val parsers: ParsersBundle
 
-	public fun newLinkResolver(link: HttpUrl): LinkResolver = LinkResolver(this, link)
+	public fun newParserInstance(source: ParserMangaSource): MangaParser = parsers.newParser(source, this)
 
-	public fun newLinkResolver(link: String): LinkResolver = newLinkResolver(link.toHttpUrl())
+	/**
+	 * Find the manga a web link points at, among all the sources of [parsers]
+	 * @see [Manga.publicUrl]
+	 */
+	public suspend fun resolveLink(link: HttpUrl): Manga? = parsers.resolveLink(this, link)
+
+	public suspend fun resolveLink(link: String): Manga? = resolveLink(link.toHttpUrl())
 
 	public open fun encodeBase64(data: ByteArray): String = Base64.getEncoder().encodeToString(data)
 
