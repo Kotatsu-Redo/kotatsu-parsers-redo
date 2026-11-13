@@ -3,9 +3,10 @@ name: Publish parsers bundle
 # Makes the parsers of master available to the apps already installed, which take them in by themselves:
 # when they are next opened, when a manga is opened, or as soon as a source fails. Nobody is asked or told.
 #
-# Run by hand, from the Actions tab, and it goes straight through: the parsers are built, checked for fitting
-# the apps they are meant for, signed and uploaded. Nothing is tested against the sites here. That is done for
-# every pull request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
+# Run by hand, from the Actions tab: the parsers are built, checked for fitting the apps they are meant for,
+# signed and uploaded. Started by the owner of the repository it goes straight through. Started by anyone else
+# it waits for a reviewer to approve it. Nothing is tested against the sites here. That is done for every pull
+# request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
 on:
   workflow_dispatch:
 
@@ -44,15 +45,55 @@ jobs:
       - name: Check that every source has its parser
         run: ./gradlew test --tests '*ParsersBundleTest'
 
-  # Only what is on master, and only once the check above has passed: when that job fails, or is left out for
-  # the run being on another branch, this one is left out too and nothing is published.
+  # For a run that somebody other than the owner started. The environment is what makes it wait: it has
+  # required reviewers, and nothing here goes on until one of them has approved it from the page of the run.
+  # The owner's own runs leave this job out.
+  #
+  # Only the first attempt of a run is ever asked about. Started again by somebody other than the owner, a
+  # run publishes nothing, whatever was approved before: what GitHub keeps of earlier attempts (the result of
+  # a job that is not run again, an approval already given) is not something to build a confirmation on.
+  # They start a new run, which is asked about afresh.
+  confirm:
+    needs: check
+    if: github.ref == 'refs/heads/master' && github.triggering_actor != 'clquwu' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    environment: parsers-bundle-review
+    permissions:
+      actions: read
+    steps:
+      # An environment that was never given reviewers lets everything through without asking anyone.
+      # So the approval itself is looked for, and anything but finding one stops the run.
+      - name: Make sure somebody confirmed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          approvals=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved") | select(any(.environments[]; (.name | ascii_downcase) == "parsers-bundle-review"))] | length')
+          if [ "$approvals" -ge 1 ] 2> /dev/null; then
+            echo "Confirmed by a reviewer."
+          else
+            echo "::error::No approval of this run was found for the parsers-bundle-review environment. Give that environment required reviewers (Settings > Environments), then start a new run: this one cannot be started again."
+            exit 1
+          fi
+
+  # Only what is on master, and only once the check above has passed. Either the owner started this attempt
+  # of the run, and nobody has to be asked whatever happened in earlier attempts, or somebody else started
+  # the run and a reviewer said yes to this, its first attempt. Anything else publishes nothing: a check that
+  # failed, a run on another branch, a confirmation that was refused or never asked for, a run started again
+  # by somebody other than the owner.
   #
   # The signing key is a secret of this environment and not of the repository. The environment is set, in the
   # repository's settings, to be used from master alone: a copy of this workflow on another branch, with the
   # conditions here taken out, is still refused the key. See "The key" in docs/BUNDLE.md.
   publish:
-    needs: check
-    if: github.ref == 'refs/heads/master'
+    needs: [check, confirm]
+    if: >-
+      ${{
+        !cancelled() && github.ref == 'refs/heads/master' && needs.check.result == 'success' && (
+          github.triggering_actor == 'clquwu' ||
+          (github.run_attempt == 1 && needs.confirm.result == 'success')
+        )
+      }}
     runs-on: ubuntu-latest
     environment: PARSERS_SIGNING_KEY
     permissions:
@@ -70,6 +111,17 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
+      # A run publishes the commit it was started on, and can sit waiting for its confirmation, or be started
+      # again, long after. If master has moved on since, a revert say, what would go out is no longer what is
+      # on master: nothing is published, and a new run is started instead
+      - name: Make sure this is still what is on master
+        run: |
+          head=$(git ls-remote origin refs/heads/master | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::master has moved on since this run was started: it is at ${head:-nothing that could be read}, and this run is of $GITHUB_SHA. Nothing is published. Start a new run."
+            exit 1
+          fi
 
       # Built from nothing but the checkout: no cache another job could have written to
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4

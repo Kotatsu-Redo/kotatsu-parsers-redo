@@ -70,6 +70,7 @@ them can rewrite the check it has to pass.
 |---|---|---|---|
 | `pull-request.yml` | yes | read only | none |
 | `publish-parsers-bundle.yml`, checking job | what is on `master`, visiting no site | read only | none |
+| `publish-parsers-bundle.yml`, confirming job | no: it only waits for a reviewer | read only | none |
 | `publish-parsers-bundle.yml`, signing job | **no**: the parsers are compiled, never run | the release | the signing key, on `master` only |
 
 No workflow here merges anything, and none is set off by a pull request with a token that can write (there is no
@@ -101,4 +102,5 @@ In the repository settings on GitHub:
 - Auto-merge that a maintainer turned on is turned off by GitHub when somebody without write access pushes to
   the pull request again: the new commits have not been read.
 - Merging is not publishing. Nothing reaches the apps until **Publish parsers bundle** is run. That run tests
-  nothing against the sites and asks nobody: what is on `master` goes out as it is.
+  nothing against the sites: what is on `master` goes out as it is. A run started by somebody other than the
+  owner waits for a reviewer first.

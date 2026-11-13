@@ -9,8 +9,10 @@ This is how a fix merged here gets to people in minutes instead of with the next
 
 ## Publishing
 
-Run **Publish parsers bundle** from the Actions tab, on `master`. There is nothing to fill in and nobody to
-confirm: it goes straight through, in two steps.
+Run **Publish parsers bundle** from the Actions tab, on `master`. There is nothing to fill in. When the owner
+(the one account named in the workflow) starts it, it goes straight through. When anyone else does, it waits for a reviewer to
+approve it from the page of the run ("Review deployments"): see
+[Who is asked to confirm](#who-is-asked-to-confirm). Either way it does two things:
 
 1. **Checks what is on `master`.** Every source has to have its parser, and the parsers have to fit the apps
    they are meant for (see [The checks](#the-checks)). No site is visited.
@@ -37,13 +39,40 @@ downloads the same parsers once more. Run it when there is something to send.
   source without a parser, parsers using something the apps do not have, or a key that is missing or not the one
   the apps trust. "No key to sign the parsers with" means the secret is not in the `PARSERS_SIGNING_KEY`
   environment: see [The key](#the-key).
-- **The run waits at "publish" for a review:** the environment has required reviewers. Approve it from the page
-  of the run, or untick them in the environment's settings.
+- **The owner's own run waits at "publish" for a review:** the `PARSERS_SIGNING_KEY` environment has required
+  reviewers. Approve it from the page of the run, and untick them in the environment's settings.
+- **Somebody else's run stops at "confirm" with an error:** either a reviewer rejected it, or the
+  `parsers-bundle-review` environment has no reviewers, so there was nobody to ask. The workflow does not take
+  that for a yes.
+- **Somebody else started a run again and it did nothing:** only the first attempt of their run can be
+  approved. They start a new run.
+- **"master has moved on since this run was started":** the run was of a commit that is no longer the head of
+  `master`: something was pushed or merged while it ran, while it waited, or before it was started again.
+  Start a new run.
 - **Only the last step fails**, the one that removes older files: the publication is out. Starting the run again
   is refused, as what is published is already as new, and is not needed.
-- **An old run is started again:** it publishes nothing. Once something newer is out, an older build cannot be
-  put over it.
+- **An old run is started again:** it publishes nothing if `master` has moved on since, or if something as new
+  is already out. An older build cannot be put over a newer one.
 - **The run was started on another branch:** it does nothing. Only `master` is published.
+
+### Who is asked to confirm
+
+Nobody, when the owner starts the run, or starts any run again: the account named in the conditions of the
+`confirm` and `publish` jobs of `publish-parsers-bundle.yml`. Change the name there, in both jobs, if that is
+to be somebody else.
+
+A run started by anyone else waits in the `confirm` job. The waiting is done by a GitHub environment: in
+Settings > Environments, the one named `parsers-bundle-review` has **Required reviewers** ticked, with whoever
+may approve a publication. Until it has reviewers, such a run stops with an error instead of publishing. Tick
+**Prevent self-review** there if a reviewer who starts a run should not be able to approve it alone.
+
+Only the first attempt of their run is asked about. Started again by anyone but the owner, it publishes
+nothing, whatever was approved before: they start a new run, which is asked about afresh.
+
+This keeps a publication from going out that nobody in charge looked at. It does not stop somebody with write
+access from changing the workflow itself, by a push to `master` or by merging a pull request of their own:
+who can do that is what the repository's access list and its ruleset decide, and the ruleset of
+[PULL_REQUESTS.md](PULL_REQUESTS.md) asks for passing checks, not for a second person.
 
 ### Taking a publication back
 
@@ -63,8 +92,10 @@ using the app.** The key is the `PARSERS_SIGNING_KEY` secret of a GitHub environ
 environment can only be used by runs on `master`. A workflow on any other branch is refused it, whatever the
 workflow says. It must not also be a secret of the repository: every branch can read those.
 
-So what gets signed is what is on `master`, by whoever starts the run. Keep the list of people who can push to
-`master` or change the repository's settings as short as the list of people who can release the app.
+So what gets signed is what is on `master` when the run is started, and only if it is still there when the
+run gets to building it. Keep the list
+of people who can push to `master` or change the repository's settings as short as the list of people who can
+release the app.
 
 In the workflow the key is handed to one step alone, the one that signs, in a job that compiles and packs the
 parsers and runs none of their code. Keep it that way: a parser is code anyone may have sent in a pull request, and
@@ -80,7 +111,7 @@ Setting it up, once:
 - The file it writes is the private key. It goes into a GitHub environment, in Settings > Environments:
   - create an environment named `PARSERS_SIGNING_KEY`;
   - under **Deployment branches and tags** choose *Selected branches and tags* and add `master`;
-  - leave **Required reviewers** unticked, or every publication waits for somebody to approve it;
+  - leave **Required reviewers** unticked, or the owner's own publications wait for an approval too;
   - under **Environment secrets** add a secret named `PARSERS_SIGNING_KEY` and paste the whole file into it,
     the `BEGIN` and `END` lines included.
 
