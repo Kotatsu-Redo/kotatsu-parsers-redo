@@ -11,11 +11,14 @@ import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.TaskAction
 import java.io.File
 import java.util.Random
+import java.util.TreeSet
 
 private const val SITE_DIR = "src/main/kotlin/org/koitharu/kotatsu/parsers/site/"
 private const val LIST_LIMIT = 40
 private const val TRIGGER_LIMIT = 5
 private val COMMIT_NAME = Regex("[0-9A-Za-z._/~^-]{1,200}")
+private val DECLARED_SOURCE = Regex("""@MangaSourceParser\(\s*"([A-Z0-9_]+)"""")
+private val BROKEN_ANNOTATION = Regex("""^@Broken(?:$|[(\s])""")
 
 /**
  * Decides which sources the live tests are run for: the ones a pull request changes ([comparedWith]) or, when that
@@ -28,6 +31,11 @@ private val COMMIT_NAME = Regex("[0-9A-Za-z._/~^-]{1,200}")
  *
  * What goes into the parsers and is not vouched for by any tested source is counted as untested, and a person is asked
  * to look at it: it must never be merged on the strength of tests that did not touch it.
+ *
+ * A source that is removed is gone from the code that is built, so it cannot be tested there. It is told apart by what
+ * it was in the base commit: a source marked broken is let go, and one that was not is named in removed.txt, to be
+ * tested as the base commit has it. That goes for a source taken out of a file that stays as well. A source that only
+ * moved to another file is not a removal.
  */
 abstract class SelectParserTestsTask : DefaultTask() {
 
@@ -109,6 +117,9 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		val untestedChanged: List<String>,
 		val untestedDeleted: List<String>,
 		val broken: List<String>,
+		/** Sources that are gone and were marked broken, and those that are gone and were not. */
+		val removedBroken: List<String>,
+		val removedLive: List<String>,
 	) {
 		val tested: List<String> = (own + groups.flatMap { it.sampled } + everythingSampled).distinct().sorted()
 		val untested: Int = untestedChanged.size + untestedDeleted.size
@@ -128,7 +139,7 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		val relevantDeleted = deleted.filter(::isRelevant)
 		val nothingChanged = relevant.isEmpty() && relevantDeleted.isEmpty()
 
-		val selection = if (nothingChanged) null else select(sources, relevant, relevantDeleted, head)
+		val selection = if (nothingChanged) null else select(sources, relevant, relevantDeleted, head, directory, base)
 		val plan = if (selection == null) {
 			buildString {
 				appendLine("## Plan")
@@ -144,10 +155,14 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		val tested = selection?.tested.orEmpty()
 		File(out, "sources.txt").writeText(tested.joinToString(","))
 		File(out, "plan.md").writeText(plan)
+		File(out, "removed.txt").writeText(selection?.removedLive.orEmpty().joinToString(","))
 		File(out, "selection.properties").writeText(
 			"base=$base\nnothingChanged=$nothingChanged\nuntested=${selection?.untested ?: 0}\n",
 		)
-		logger.lifecycle("Sources to test: ${tested.size}, untested changes: ${selection?.untested ?: 0} (compared with $base)")
+		logger.lifecycle(
+			"Sources to test: ${tested.size}, removed sources to test as they were: ${selection?.removedLive?.size ?: 0}, " +
+				"untested changes: ${selection?.untested ?: 0} (compared with $base)",
+		)
 	}
 
 	/** The sources map, if it can be trusted: a map that is empty or points at files that are not there is stale. */
@@ -245,6 +260,8 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		changed: List<String>,
 		deleted: List<String>,
 		head: String,
+		directory: File,
+		base: String,
 	): Selection {
 		val changedSet = changed.toSet()
 		val ownFiles = sources.mapTo(HashSet()) { it.ownFile }
@@ -318,7 +335,37 @@ abstract class SelectParserTestsTask : DefaultTask() {
 			covered += triggers
 		}
 		val untestedChanged = changed.filter { it !in covered }.sorted()
-		val untestedDeleted = deleted.filter { it.startsWith(SITE_DIR) || it !in covered }.sorted()
+		val removedBroken = TreeSet<String>()
+		val removedLive = TreeSet<String>()
+		val accountedFor = HashSet<String>()
+		val current = sources.associateBy { it.name }
+		val deletedSet = deleted.toSet()
+		// What each file declared in the base commit. The files that stayed are gone through too: a source can be taken
+		// out of a file that holds several
+		for (file in deleted + changed) {
+			if (!file.startsWith(SITE_DIR) || !file.endsWith(".kt")) continue
+			// A file that was added has nothing there
+			val text = git(directory, "show", "$base:./$file") ?: continue
+			val declared = declaredSources(text)
+			if (declared.isEmpty()) continue
+			var isAccountedFor = true
+			for ((name, wasBroken) in declared) {
+				val now = current[name]
+				if (now == null) {
+					(if (wasBroken) removedBroken else removedLive) += name
+				} else if (file in deletedSet && now.isBroken && !wasBroken) {
+					// Moved and marked broken in one go, which no test here speaks for: as any deleted file was before
+					isAccountedFor = false
+				}
+				// Otherwise it is still a source of the code being built, and is tested where it is
+			}
+			if (isAccountedFor) {
+				accountedFor += file
+			}
+		}
+		val untestedDeleted = deleted.filter {
+			if (it.startsWith(SITE_DIR)) it !in accountedFor else it !in covered
+		}.sorted()
 		return Selection(
 			own = ownTested.map { it.name }.sorted(),
 			groups = groups,
@@ -330,7 +377,27 @@ abstract class SelectParserTestsTask : DefaultTask() {
 			// Only the ones that changed themselves are worth naming: a changed base class has broken sources by the
 			// hundred among those that build on it, and a list of them buries what the plan is read for
 			broken = brokenSources.filter { it.ownFile in changedSet }.map { it.name }.sorted(),
+			removedBroken = removedBroken.toList(),
+			removedLive = removedLive.toList(),
 		)
+	}
+
+	/**
+	 * The sources a file declares, with whether each is marked broken. Only the annotations standing together with
+	 * the one that declares it are looked at, with nothing between them but empty lines and line comments, and when
+	 * in doubt it is not broken: then it is tested.
+	 */
+	private fun declaredSources(text: String): List<Pair<String, Boolean>> {
+		val lines = text.split('\n').map { it.trim() }
+		fun standsWithAnnotations(line: String) = line.startsWith("@") || line.isEmpty() || line.startsWith("//")
+		return DECLARED_SOURCE.findAll(text).map { match ->
+			val line = text.substring(0, match.range.first).count { it == '\n' }
+			var first = line
+			while (first > 0 && standsWithAnnotations(lines[first - 1])) first--
+			var last = line
+			while (last < lines.size - 1 && standsWithAnnotations(lines[last + 1])) last++
+			match.groupValues[1] to (first..last).any { BROKEN_ANNOTATION.containsMatchIn(lines[it]) }
+		}.distinct().toList()
 	}
 
 	private fun makePlan(base: String, origin: String, fileCount: Int, selection: Selection) = buildString {
@@ -379,13 +446,34 @@ abstract class SelectParserTestsTask : DefaultTask() {
 			appendNames(items)
 			appendLine()
 		}
+		if (selection.removedBroken.isNotEmpty()) {
+			val one = selection.removedBroken.size == 1
+			appendLine(
+				"**${selection.removedBroken.size} ${if (one) "source is" else "sources are"} removed that " +
+					"${if (one) "was" else "were"} already marked broken**, so nothing that worked is lost:",
+			)
+			appendLine()
+			appendNames(selection.removedBroken)
+			appendLine()
+		}
+		if (selection.removedLive.isNotEmpty()) {
+			val one = selection.removedLive.size == 1
+			appendLine(
+				"**${selection.removedLive.size} ${if (one) "source is" else "sources are"} removed that " +
+					"${if (one) "is" else "are"} not marked broken.** ${if (one) "It is" else "Each is"} tested as `$base` has it: " +
+					"the removal is vouched for only if its site turns out to be gone.",
+			)
+			appendLine()
+			appendNames(selection.removedLive)
+			appendLine()
+		}
 		if (selection.broken.isNotEmpty()) {
 			appendLine("**Changed, and left out for being marked broken:**")
 			appendLine()
 			appendNames(selection.broken)
 			appendLine()
 		}
-		if (selection.tested.isEmpty()) {
+		if (selection.tested.isEmpty() && selection.untested > 0 && selection.removedLive.isEmpty()) {
 			appendLine("No source could be tested.")
 		}
 	}

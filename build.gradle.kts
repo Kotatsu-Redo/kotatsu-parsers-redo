@@ -367,6 +367,7 @@ tasks.register<SummarizeParserTestsTask>("summarizeParserTests") {
         layout.projectDirectory.dir(providers.gradleProperty("testResultsDir"))
             .orElse(layout.buildDirectory.dir("test-results/test")),
     )
+    removedResultsDir.set(parsersTestsDir.map { it.dir("removed") })
     outputDir.set(parsersTestsDir)
 }
 

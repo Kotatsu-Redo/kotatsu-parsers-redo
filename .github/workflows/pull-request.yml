@@ -53,6 +53,7 @@ jobs:
         run: |
           ./gradlew selectParserTests "-PcomparedWith=HEAD~1"
           echo "sources=$(cat build/parsersTests/sources.txt)" >> "$GITHUB_OUTPUT"
+          echo "removed=$(cat build/parsersTests/removed.txt)" >> "$GITHUB_OUTPUT"
 
       # A failing test does not fail this step: what the failures amount to is decided in the next ones
       - name: Test them against their sites
@@ -60,6 +61,27 @@ jobs:
         env:
           SOURCES: ${{ steps.select.outputs.sources }}
         run: ./gradlew test --tests 'org.koitharu.kotatsu.parsers.MangaParserTest' "-PtestSources=$SOURCES"
+
+      # What a pull request removes is gone from it and cannot be tested in it, so it is tested as master has it: that
+      # tells a source whose site is gone from one that works. Three of the tests are enough to tell, and dozens of
+      # sites that no longer answer would take hours with all of them. A run that could not be made does not stop
+      # the job: the summary then says those sources were not run, which is for a person to look at
+      - name: Test the sources it removes, as master has them
+        if: steps.select.outputs.removed != ''
+        env:
+          REMOVED: ${{ steps.select.outputs.removed }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/master" HEAD~1
+          cd "$RUNNER_TEMP/master"
+          ./gradlew test "-PtestSources=$REMOVED" \
+            --tests 'org.koitharu.kotatsu.parsers.MangaParserTest.list' \
+            --tests 'org.koitharu.kotatsu.parsers.MangaParserTest.details' \
+            --tests 'org.koitharu.kotatsu.parsers.MangaParserTest.link' \
+            || echo "::warning::The removed sources could not be tested as master has them"
+          mkdir -p "$GITHUB_WORKSPACE/build/parsersTests/removed"
+          if [ -d build/test-results/test ]; then
+            find build/test-results/test -name '*.xml' -exec cp {} "$GITHUB_WORKSPACE/build/parsersTests/removed/" \;
+          fi
 
       - name: Sum up
         id: summary
@@ -79,7 +101,8 @@ jobs:
           overwrite: true
 
       # Green only when everything that was tested passed. A failing source, one that Cloudflare kept from being
-      # tested, or a change no test covers is for a person to look at: the pull request can still be merged by hand
+      # tested, a change no test covers, or the removal of a source whose site is not shown to be gone is for a
+      # person to look at: the pull request can still be merged by hand
       - name: Say whether this can be merged as it is
         env:
           VERDICT: ${{ steps.summary.outputs.verdict }}
