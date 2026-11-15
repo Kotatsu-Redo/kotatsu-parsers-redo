@@ -20,7 +20,7 @@ import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("NINENINENINEHENTAI", "AnimeH", type = ContentType.HENTAI)
 internal class NineNineNineHentaiParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.NINENINENINEHENTAI, PAGE_SIZE), Interceptor {

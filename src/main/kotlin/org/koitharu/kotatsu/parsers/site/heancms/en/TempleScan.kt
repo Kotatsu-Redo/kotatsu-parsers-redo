@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.heancms.HeanCms
 
-@Broken("Not dead, changed template")
+@Broken("Blocked by Cloudflare challenge")
 @MangaSourceParser("TEMPLESCAN", "TempleScan", "en")
 internal class TempleScan(context: MangaLoaderContext) :
 	HeanCms(context, MangaParserSource.TEMPLESCAN, "templetoons.com") {

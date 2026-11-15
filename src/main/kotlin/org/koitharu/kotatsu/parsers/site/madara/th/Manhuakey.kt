@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MANHUAKEY", "ManhuaKey", "th")
 internal class Manhuakey(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANHUAKEY, "www.manhuakey.com", 10) {

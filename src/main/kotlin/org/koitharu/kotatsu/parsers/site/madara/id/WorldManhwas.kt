@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("WORLDMANHWAS", "WorldManhwas", "id", ContentType.HENTAI)
 internal class WorldManhwas(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.WORLDMANHWAS, "worldmanhwas.zone", 10) {

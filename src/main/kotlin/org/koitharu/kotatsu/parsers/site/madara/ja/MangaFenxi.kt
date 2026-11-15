@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MANGAFENXI", "MangaFenxi", "ja")
 internal class MangaFenxi(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGAFENXI, "mangafenxi.net", 40) {

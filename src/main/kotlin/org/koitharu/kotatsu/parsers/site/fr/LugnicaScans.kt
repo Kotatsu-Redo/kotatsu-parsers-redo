@@ -16,7 +16,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("LUGNICASCANS", "LugnicaScans", "fr")
 internal class LugnicaScans(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.LUGNICASCANS, 10) {

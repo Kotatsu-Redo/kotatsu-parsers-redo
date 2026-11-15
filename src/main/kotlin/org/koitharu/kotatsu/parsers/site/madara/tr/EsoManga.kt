@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("ESOMANGA", "EsoManga", "tr")
 internal class EsoManga(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.ESOMANGA, "esomanga.com", 10) {

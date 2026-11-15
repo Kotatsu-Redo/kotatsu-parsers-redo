@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("KOMIKPIX", "KomikPix", "id", ContentType.HENTAI)
 internal class KomikPix(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.KOMIKPIX, "komikpix.com", pageSize = 30, searchPageSize = 14) {

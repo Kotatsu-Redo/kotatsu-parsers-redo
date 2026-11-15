@@ -8,7 +8,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import java.util.*
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("GEKKOUSCANS", "GekkouScans", "pt", ContentType.HENTAI)
 internal class GekkouScans(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.GEKKOUSCANS, "gekkou.site") {

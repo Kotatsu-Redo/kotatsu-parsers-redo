@@ -290,31 +290,31 @@ internal abstract class LineWebtoonsParser(
 		return builder.build()
 	}
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_EN", "LineWebtoons English", "en", type = ContentType.MANGA)
 	class English(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_EN)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_ZH", "LineWebtoons Chinese", "zh", type = ContentType.MANGA)
 	class Chinese(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_ZH)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_TH", "LineWebtoons Thai", "th", type = ContentType.MANGA)
 	class Thai(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_TH)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_ID", "LineWebtoons Indonesian", "id", type = ContentType.MANGA)
 	class Indonesian(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_ID)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_ES", "LineWebtoons Spanish", "es", type = ContentType.MANGA)
 	class Spanish(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_ES)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_FR", "LineWebtoons French", "fr", type = ContentType.MANGA)
 	class French(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_FR)
 
-	@Broken
+	@Broken("Site responds but parser is broken or outdated")
 	@MangaSourceParser("LINEWEBTOONS_DE", "LineWebtoons German", "de", type = ContentType.MANGA)
 	class German(context: MangaLoaderContext) : LineWebtoonsParser(context, MangaParserSource.LINEWEBTOONS_DE)
 

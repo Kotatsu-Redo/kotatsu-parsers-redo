@@ -34,7 +34,7 @@ import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
 
-@Broken("Need to work on bypass protection for images")
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("READCOMICONLINE", "ReadComicOnline", "en", ContentType.COMICS)
 internal class ReadComicOnline(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.READCOMICONLINE, 36) {

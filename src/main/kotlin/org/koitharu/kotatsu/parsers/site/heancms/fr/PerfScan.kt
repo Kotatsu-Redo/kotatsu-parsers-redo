@@ -33,7 +33,7 @@ import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
 
-@Broken("Site inaccessible (erreur 520)")
+@Broken("Site returns HTTP 5xx")
 @MangaSourceParser("PERF_SCAN", "PerfScan", "fr")
 internal class PerfScan(context: MangaLoaderContext) :
 	HeanCms(context, MangaParserSource.PERF_SCAN, "perf-scan.xyz"), Interceptor {

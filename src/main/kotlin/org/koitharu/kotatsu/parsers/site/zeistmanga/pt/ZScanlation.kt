@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.ContentType
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.zeistmanga.ZeistMangaParser
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("ZSCANLATION", "ZScanlation", "pt", ContentType.HENTAI)
 internal class ZScanlation(context: MangaLoaderContext) :
 	ZeistMangaParser(context, MangaParserSource.ZSCANLATION, "www.zscanlation.com") {

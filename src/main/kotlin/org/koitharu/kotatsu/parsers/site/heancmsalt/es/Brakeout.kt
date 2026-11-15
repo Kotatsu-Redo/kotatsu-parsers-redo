@@ -10,7 +10,7 @@ import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("BRAKEOUT", "Brakeout", "es")
 internal class Brakeout(context: MangaLoaderContext) :
 	HeanCmsAlt(context, MangaParserSource.BRAKEOUT, "brakeout.xyz", 10) {

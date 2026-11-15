@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mmrcms.MmrcmsParser
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("JPMANGAS", "JpMangas", "fr")
 internal class JpMangas(context: MangaLoaderContext) :
 	MmrcmsParser(context, MangaParserSource.JPMANGAS, "jpmangas.xyz") {

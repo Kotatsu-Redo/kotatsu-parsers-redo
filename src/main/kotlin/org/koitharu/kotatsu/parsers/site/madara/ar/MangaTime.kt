@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken
+@Broken("Not dead, changed template")
 @MangaSourceParser("MANGATIME", "MangaTime", "ar")
 internal class MangaTime(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.MANGATIME, "mangatime.org") {

@@ -15,7 +15,7 @@ import java.util.*
 
 // TODO: Check if manga is NSFW by checking the genre
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("KUMAPAGE", "Kumapage", "id")
 internal class Kumapage(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.KUMAPAGE, 14) {

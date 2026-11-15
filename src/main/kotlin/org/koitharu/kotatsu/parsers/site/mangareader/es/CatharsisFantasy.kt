@@ -12,7 +12,7 @@ import java.util.ArrayList
 import java.util.Base64
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("CATHARSISFANTASY", "CatharsisFantasy", "es")
 internal class CatharsisFantasy(context: MangaLoaderContext) :
 	MangaReaderParser(

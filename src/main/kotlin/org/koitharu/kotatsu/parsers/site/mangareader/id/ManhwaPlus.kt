@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.*
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("MANHWAPLUS", "ManhwaPlus", "id", ContentType.HENTAI)
 internal class ManhwaPlus(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.MANHWAPLUS, "manhwablue.com", 20, 10) {

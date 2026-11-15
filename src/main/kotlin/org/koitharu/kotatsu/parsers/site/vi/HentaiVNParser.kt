@@ -19,7 +19,7 @@ import java.util.*
 private const val PAGE_SIZE = 15
 private const val SEARCH_PAGE_SIZE = 10
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("HENTAIVN", "HentaiVN", "vi", type = ContentType.HENTAI)
 internal class HentaiVNParser(context: MangaLoaderContext) : AbstractMangaParser(context, MangaParserSource.HENTAIVN) {
 

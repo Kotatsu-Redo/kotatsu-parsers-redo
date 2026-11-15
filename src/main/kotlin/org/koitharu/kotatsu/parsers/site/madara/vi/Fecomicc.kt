@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken("No longer available")
+@Broken("Original site closed")
 @MangaSourceParser("FECOMICC", "Fecomic", "vi")
 internal class Fecomicc(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.FECOMICC, "mangasup.net", 9) {

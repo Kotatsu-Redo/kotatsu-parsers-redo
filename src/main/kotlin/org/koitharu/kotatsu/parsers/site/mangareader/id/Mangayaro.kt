@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import java.util.*
 
-@Broken
+@Broken("Domain parked or for sale")
 @MangaSourceParser("MANGAYARO", "MangaYaro", "id")
 internal class Mangayaro(context: MangaLoaderContext) :
 	MangaReaderParser(

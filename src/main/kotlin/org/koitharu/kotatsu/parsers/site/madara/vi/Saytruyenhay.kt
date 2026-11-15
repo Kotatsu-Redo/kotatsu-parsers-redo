@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 import org.koitharu.kotatsu.parsers.util.*
 
-@Broken
+@Broken("Domain no longer resolves")
 @MangaSourceParser("SAYTRUYENHAY", "PheTruyen", "vi")
 internal class Saytruyenhay(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.SAYTRUYENHAY, "phetruyen.vip", 40) {

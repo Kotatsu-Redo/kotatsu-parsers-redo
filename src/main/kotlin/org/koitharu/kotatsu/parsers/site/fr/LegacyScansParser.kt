@@ -13,7 +13,7 @@ import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken("images canvas need to refactor")
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("LEGACY_SCANS", "LegacyScans", "fr")
 internal class LegacyScansParser(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.LEGACY_SCANS, 18) {

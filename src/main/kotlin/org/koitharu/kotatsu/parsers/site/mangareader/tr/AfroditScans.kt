@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.Broken
 
-@Broken
+@Broken("Chapters require site membership/login")
 @MangaSourceParser("AFRODITSCANS", "AfroditScans", "tr")
 internal class AfroditScans(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.AFRODITSCANS, "afroditscans.com", pageSize = 20, searchPageSize = 10) {

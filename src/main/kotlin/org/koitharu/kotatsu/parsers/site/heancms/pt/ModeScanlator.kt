@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.heancms.HeanCms
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("MODESCANLATOR", "ModeScanlator", "pt")
 internal class ModeScanlator(context: MangaLoaderContext) :
 	HeanCms(context, MangaParserSource.MODESCANLATOR, "site.modescanlator.net") {

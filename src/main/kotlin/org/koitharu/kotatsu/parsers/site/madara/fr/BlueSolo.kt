@@ -6,7 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
-@Broken ( "Need refactor")
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("BLUESOLO", "BlueSolo", "fr")
 internal class BlueSolo(context: MangaLoaderContext) :
 	MadaraParser(context, MangaParserSource.BLUESOLO, "www1.bluesolo.org", 10) {

@@ -14,7 +14,7 @@ import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.*
 
-@Broken
+@Broken("Site unreachable (connection failed)")
 @MangaSourceParser("MANGAPARK", "MangaPark")
 internal class MangaPark(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.MANGAPARK, pageSize = 36) {

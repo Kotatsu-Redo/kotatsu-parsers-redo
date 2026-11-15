@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mmrcms.MmrcmsParser
 import java.util.*
 
-@Broken
+@Broken("Site returns HTTP 5xx")
 @MangaSourceParser("JPSCANVF", "LireScanVf.com", "fr")
 internal class JpScanVf(context: MangaLoaderContext) :
 	MmrcmsParser(context, MangaParserSource.JPSCANVF, "lirescanvf.com") {

@@ -9,7 +9,7 @@ import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 
-@Broken
+@Broken("Site returns HTTP 403")
 @MangaSourceParser("SSSSCANLATOR", "YomuComics", "pt")
 internal class SssScanlator(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.SSSSCANLATOR, "yomucomics.com", pageSize = 20, searchPageSize = 10) {

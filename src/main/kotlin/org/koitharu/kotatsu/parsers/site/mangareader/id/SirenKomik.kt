@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("SIRENKOMIK", "SirenKomik", "id")
 internal class SirenKomik(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.SIRENKOMIK, "sirenkomik.xyz", pageSize = 20, searchPageSize = 10) {

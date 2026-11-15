@@ -11,7 +11,7 @@ import org.koitharu.kotatsu.parsers.util.mapToSet
 import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.requireElementById
 
-@Broken
+@Broken("Site returns HTTP 404")
 @MangaSourceParser("KLMANHUA", "KlManhua", "id", ContentType.HENTAI)
 internal class KlManhua(context: MangaLoaderContext) :
 	ZeistMangaParser(context, MangaParserSource.KLMANHUA, "klmanhua.blogspot.com") {

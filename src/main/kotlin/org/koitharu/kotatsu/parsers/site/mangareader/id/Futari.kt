@@ -7,7 +7,7 @@ import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 
-@Broken
+@Broken("Site responds but parser is broken or outdated")
 @MangaSourceParser("FUTARI", "Futari", "id")
 internal class Futari(context: MangaLoaderContext) :
 	MangaReaderParser(context, MangaParserSource.FUTARI, "futari.info", pageSize = 25, searchPageSize = 10) {
