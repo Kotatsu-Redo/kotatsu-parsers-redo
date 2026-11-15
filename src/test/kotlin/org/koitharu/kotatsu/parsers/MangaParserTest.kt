@@ -163,7 +163,7 @@ internal class MangaParserTest {
 		parser.getDetails(manga).apply {
 			assert(!chapters.isNullOrEmpty()) { "Chapters are null or empty" }
 			assert(publicUrl.isUrlAbsolute()) { "Manga public url is not absolute: '$publicUrl'" }
-			assert(description != null) { "Detailed description is null: '$publicUrl'" }
+			// No description is not checked: plenty of manga have none on their site, and the test picks one at random
 			assert(title.startsWith(manga.title)) {
 				"Titles are mismatch: '$title' and '${manga.title}' for $publicUrl"
 			}

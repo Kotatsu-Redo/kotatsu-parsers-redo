@@ -32,11 +32,32 @@ private const val NO_MANGA_TO_TAKE = "java.util.NoSuchElementException"
 private val NEED_A_LIST = setOf("details", "pages", "link", "search", "tags", "tags_multiple")
 
 /**
+ * Tests whose failure leaves the source working for whoever reads with it: its icon, the address it is reached at,
+ * opening a link to it, a filter by language, a filter by two genres at once. They are noted, and are not a reason to
+ * keep a change out.
+ */
+private val MINOR_TESTS = setOf("favicon", "domain", "link", "locale", "tags_multiple")
+
+/**
+ * The same, by what a failure says, in any other test: a cover that does not load, pages of the list that overlap
+ * because something was published between the two, a genre that is not capitalized, two chapters with the same
+ * number. A picture that does not load in `pages` is not one of them: that is reading.
+ */
+private val MINOR_FAILURES = listOf(
+	"Request failed: ",
+	"Wrong response mime type: ",
+	"Pages are intersected by ",
+	"Not all tags are capitalized",
+	"Chapters are not distinct by branch/volume/number",
+)
+
+/**
  * Reads how the live tests of the sources selectParserTests chose went, and says whether a person has to look at it
  * before the change is merged.
  *
  * It never fails because tests failed: that is what it reports. A failure caused by Cloudflare is told apart because
- * it says something about the site and about where the tests run, and nothing about the code.
+ * it says something about the site and about where the tests run, and nothing about the code. Small failures, see
+ * [MINOR_TESTS] and [MINOR_FAILURES], are shown and let through.
  *
  * A source that a pull request removes cannot be tested in it, so it is judged by a run made as the base commit has it
  * (removedResultsDir): its removal is vouched for only when that run shows its site to be gone. A source that works,
@@ -65,6 +86,7 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 
 	private enum class Result(val title: String) {
 		PASSED("passed"),
+		NOTED("passed, with small failures"),
 		CLOUDFLARE("Cloudflare"),
 		FAILED("failed"),
 		NOT_RUN("not run"),
@@ -96,7 +118,8 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 
 		val cases = if (selected.isEmpty()) emptyMap() else readCases(resultsDir.get().asFile)
 		val rows = selected.map { source -> source to judge(cases[source].orEmpty()) }
-		val notPassed = rows.filter { it.second.first != Result.PASSED }
+		val notPassed = rows.filter { it.second.first != Result.PASSED && it.second.first != Result.NOTED }
+		val noted = rows.count { it.second.first == Result.NOTED }
 		val removedCases = if (removed.isEmpty()) emptyMap() else readCases(removedResultsDir.get().asFile)
 		val removedRows = removed.map { source -> source to judgeRemoved(removedCases[source].orEmpty()) }
 		val notGone = removedRows.filter { it.second.first != Removal.GONE }
@@ -133,19 +156,26 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 			}
 			val removedWork = if (removedRows.size == 1) "the one removed source no longer works" else
 				"the ${removedRows.size} removed sources no longer work"
+			val passedSmall = when {
+				noted == 0 -> ""
+				rows.size == 1 -> ", with small failures"
+				else -> " ($noted with small failures)"
+			}
 			appendLine(
 				when {
 					nothingChanged -> "Nothing that goes into the parsers changed, so there was nothing to test."
 					verdict == "passed" && rows.isEmpty() ->
 						if (removedRows.isEmpty()) "No source needed testing." else "No source needed testing, and $removedWork."
 					verdict == "passed" && rows.size == 1 ->
-						if (removedRows.isEmpty()) "The one tested source passed." else "The one tested source passed, and $removedWork."
+						if (removedRows.isEmpty()) "The one tested source passed$passedSmall." else
+							"The one tested source passed$passedSmall, and $removedWork."
 					verdict == "passed" ->
-						if (removedRows.isEmpty()) "All ${rows.size} tested sources passed." else "All ${rows.size} tested sources passed, and $removedWork."
+						if (removedRows.isEmpty()) "All ${rows.size} tested sources passed$passedSmall." else
+							"All ${rows.size} tested sources passed$passedSmall, and $removedWork."
 					else -> {
 						val reasons = ArrayList<String>()
 						if (notPassed.isNotEmpty()) {
-							val counts = Result.entries.filter { it != Result.PASSED }
+							val counts = Result.entries.filter { it != Result.PASSED && it != Result.NOTED }
 								.mapNotNull { kind -> rows.count { it.second.first == kind }.takeIf { it > 0 }?.let { "$it ${kind.title}" } }
 							reasons += "${notPassed.size} of ${rows.size} tested sources did not pass (${counts.joinToString(", ")})"
 						}
@@ -191,7 +221,23 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 		if (failed.isEmpty()) {
 			return Result.PASSED to ""
 		}
-		return (if (failed.all(::isCloudflare)) Result.CLOUDFLARE else Result.FAILED) to describeAll(failed)
+		val (small, hard) = failed.partition(::isSmall)
+		if (hard.isEmpty()) {
+			return Result.NOTED to describeAll(small)
+		}
+		return (if (hard.all(::isCloudflare)) Result.CLOUDFLARE else Result.FAILED) to describeAll(hard + small)
+	}
+
+	/** A failure that leaves the source working for whoever reads with it, see [MINOR_TESTS] and [MINOR_FAILURES]. */
+	private fun isSmall(case: TestCase): Boolean {
+		if (case.testName in MINOR_TESTS) {
+			return true
+		}
+		if (case.testName == "pages") {
+			return false
+		}
+		val failure = checkNotNull(case.failure)
+		return MINOR_FAILURES.any { failure.message.contains(it) }
 	}
 
 	/**
