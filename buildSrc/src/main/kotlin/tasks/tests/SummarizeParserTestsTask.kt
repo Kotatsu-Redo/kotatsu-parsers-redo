@@ -62,6 +62,9 @@ private val MINOR_FAILURES = listOf(
  * A source that a pull request removes cannot be tested in it, so it is judged by a run made as the base commit has it
  * (removedResultsDir): its removal is vouched for only when that run shows its site to be gone. A source that works,
  * and one the tests could not reach, are for a person to look at.
+ *
+ * So is any change outside the parser sources (the tests, the build, the workflows, the core): no result vouches for
+ * it, however good.
  */
 abstract class SummarizeParserTestsTask : DefaultTask() {
 
@@ -111,6 +114,9 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 		val selectionProperties = Properties().apply { selectionFile.reader().use(::load) }
 		val nothingChanged = selectionProperties.getProperty("nothingChanged")?.trim() == "true"
 		val untested = selectionProperties.getProperty("untested")?.trim()?.toIntOrNull() ?: 0
+		// Written by every selection since it was added, and a selection without it is not trusted with a green check
+		val outsideSources = selectionProperties.getProperty("protected")?.trim()?.toIntOrNull()
+			?: throw GradleException("$selectionFile does not say what changed outside the sources: run selectParserTests again")
 		val plan = planFile.readText().trimEnd()
 		// Outputs of older versions have no such file
 		val removed = File(dir, "removed.txt").takeIf { it.isFile }?.readText().orEmpty()
@@ -124,6 +130,7 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 		val removedRows = removed.map { source -> source to judgeRemoved(removedCases[source].orEmpty()) }
 		val notGone = removedRows.filter { it.second.first != Removal.GONE }
 		val verdict = when {
+			outsideSources > 0 -> "review"
 			nothingChanged -> "nothing"
 			notPassed.isEmpty() && untested == 0 && notGone.isEmpty() -> "passed"
 			else -> "review"
@@ -163,7 +170,7 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 			}
 			appendLine(
 				when {
-					nothingChanged -> "Nothing that goes into the parsers changed, so there was nothing to test."
+					verdict == "nothing" -> "Nothing that goes into the parsers changed, so there was nothing to test."
 					verdict == "passed" && rows.isEmpty() ->
 						if (removedRows.isEmpty()) "No source needed testing." else "No source needed testing, and $removedWork."
 					verdict == "passed" && rows.size == 1 ->
@@ -174,6 +181,10 @@ abstract class SummarizeParserTestsTask : DefaultTask() {
 							"All ${rows.size} tested sources passed$passedSmall, and $removedWork."
 					else -> {
 						val reasons = ArrayList<String>()
+						if (outsideSources > 0) {
+							reasons += if (outsideSources == 1) "1 file outside the parser sources changed" else
+								"$outsideSources files outside the parser sources changed"
+						}
 						if (notPassed.isNotEmpty()) {
 							val counts = Result.entries.filter { it != Result.PASSED && it != Result.NOTED }
 								.mapNotNull { kind -> rows.count { it.second.first == kind }.takeIf { it > 0 }?.let { "$it ${kind.title}" } }

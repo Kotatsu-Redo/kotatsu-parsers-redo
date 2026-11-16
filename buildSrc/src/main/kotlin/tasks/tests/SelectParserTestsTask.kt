@@ -36,6 +36,9 @@ private val BROKEN_ANNOTATION = Regex("""^@Broken(?:$|[(\s])""")
  * it was in the base commit: a source marked broken is let go, and one that was not is named in removed.txt, to be
  * tested as the base commit has it. That goes for a source taken out of a file that stays as well. A source that only
  * moved to another file is not a removal.
+ *
+ * The tests vouch for sources, with their base classes and helpers, and for nothing else: see [isFreeToChange]. A
+ * change anywhere else is named in protected.txt, and a person has to read it whatever the results.
  */
 abstract class SelectParserTestsTask : DefaultTask() {
 
@@ -138,17 +141,21 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		val relevant = changed.filter(::isRelevant)
 		val relevantDeleted = deleted.filter(::isRelevant)
 		val nothingChanged = relevant.isEmpty() && relevantDeleted.isEmpty()
+		val protectedFiles = (changed + deleted).filterNot(::isFreeToChange).distinct().sorted()
 
 		val selection = if (nothingChanged) null else select(sources, relevant, relevantDeleted, head, directory, base)
-		val plan = if (selection == null) {
-			buildString {
-				appendLine("## Plan")
-				appendLine()
-				appendLine("Nothing that goes into the parsers changed since `$base`, which is $origin.")
-				appendLine("There is nothing to test.")
+		val plan = buildString {
+			appendLine("## Plan")
+			appendLine()
+			if (protectedFiles.isNotEmpty()) {
+				appendProtected(protectedFiles)
 			}
-		} else {
-			makePlan(base, origin, relevant.size + relevantDeleted.size, selection)
+			if (selection == null) {
+				appendLine("Nothing that goes into the parsers changed since `$base`, which is $origin.")
+				appendLine("There is no source to test.")
+			} else {
+				appendPlan(base, origin, relevant.size + relevantDeleted.size, selection)
+			}
 		}
 		val out = outputDir.get().asFile
 		out.mkdirs()
@@ -156,12 +163,15 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		File(out, "sources.txt").writeText(tested.joinToString(","))
 		File(out, "plan.md").writeText(plan)
 		File(out, "removed.txt").writeText(selection?.removedLive.orEmpty().joinToString(","))
+		File(out, "protected.txt").writeText(protectedFiles.joinToString("\n"))
 		File(out, "selection.properties").writeText(
-			"base=$base\nnothingChanged=$nothingChanged\nuntested=${selection?.untested ?: 0}\n",
+			"base=$base\nnothingChanged=$nothingChanged\nuntested=${selection?.untested ?: 0}\n" +
+				"protected=${protectedFiles.size}\n",
 		)
 		logger.lifecycle(
 			"Sources to test: ${tested.size}, removed sources to test as they were: ${selection?.removedLive?.size ?: 0}, " +
-				"untested changes: ${selection?.untested ?: 0} (compared with $base)",
+				"untested changes: ${selection?.untested ?: 0}, changes outside the sources: ${protectedFiles.size} " +
+				"(compared with $base)",
 		)
 	}
 
@@ -247,6 +257,25 @@ abstract class SelectParserTestsTask : DefaultTask() {
 			"--diff-filter=$filter", base, "HEAD",
 		)?.split('\u0000')?.filter { it.isNotEmpty() }
 			?: throw GradleException("git could not tell what changed between $base and HEAD")
+	}
+
+	/**
+	 * Whether a pull request may change the file and still be vouched for by the tests: the Kotlin of a source, a base
+	 * class or a helper of sources, the documentation, which runs nothing, and .github/summary.yaml, which every build
+	 * writes again.
+	 *
+	 * Everything else is either the check itself (the tests, the build, the workflows), so that the results come from
+	 * the pull request's own version of it, or code that every source runs through (core, util, network, the contract).
+	 * The check is for fixing sources and taking broken ones out, and cannot speak for either. Any other file in the
+	 * site directory is no source either (a .gitattributes there could hide a parser's diff on GitHub).
+	 *
+	 * The pull request check fails as soon as this task has written protected.txt, before the sources of the pull
+	 * request run in the tests: the tests run them, and they could rewrite what the summary reads. .github/CODEOWNERS
+	 * draws the same line for GitHub, which reads it from master, out of reach of a pull request that changes this.
+	 */
+	private fun isFreeToChange(path: String): Boolean {
+		return (path.startsWith(SITE_DIR) && path.endsWith(".kt")) || path.startsWith("docs/") ||
+			path == "README.md" || path == "CONTRIBUTING.md" || path == ".github/summary.yaml"
 	}
 
 	private fun isRelevant(path: String): Boolean {
@@ -400,9 +429,22 @@ abstract class SelectParserTestsTask : DefaultTask() {
 		}.distinct().toList()
 	}
 
-	private fun makePlan(base: String, origin: String, fileCount: Int, selection: Selection) = buildString {
-		appendLine("## Plan")
+	private fun StringBuilder.appendProtected(files: List<String>) {
+		val one = files.size == 1
+		appendLine(
+			"**${files.size} ${if (one) "file" else "files"} outside the parser sources changed.** " +
+				"The tests vouch for the Kotlin of sources, their base classes and their helpers, and for nothing " +
+				"else. The rest is " +
+				"the check itself (the tests, the build, the workflows), whose results below then come from the pull " +
+				"request's own version of it, or code that every source runs through. A person has to read " +
+				"${if (one) "it" else "them"} before this is merged, whatever the results say:",
+		)
 		appendLine()
+		appendNames(files.map { "`$it`" })
+		appendLine()
+	}
+
+	private fun StringBuilder.appendPlan(base: String, origin: String, fileCount: Int, selection: Selection) {
 		appendLine("The code was compared with `$base`, which is $origin.")
 		appendLine("Since then, $fileCount ${if (fileCount == 1) "file" else "files"} changed in the code that goes into the parsers.")
 		appendLine()

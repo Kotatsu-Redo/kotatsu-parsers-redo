@@ -47,17 +47,25 @@ jobs:
         with:
           cache-read-only: true
 
-      # What is checked out is the merge of the pull request into master: the commit before it on that side is master as it was
+      # What is checked out is the merge of the pull request into master: the commit before it on that side is master as it was.
+      # A change outside the parser sources (the tests, the build, the workflows, the core) fails the check here, while
+      # none of the pull request's sources has run: the tests below run them, and a source could rewrite what the summary
+      # reads. The steps after this still run, for a person to see the results
       - name: Choose the sources to test
         id: select
         run: |
           ./gradlew selectParserTests "-PcomparedWith=HEAD~1"
           echo "sources=$(cat build/parsersTests/sources.txt)" >> "$GITHUB_OUTPUT"
           echo "removed=$(cat build/parsersTests/removed.txt)" >> "$GITHUB_OUTPUT"
+          echo "chosen=true" >> "$GITHUB_OUTPUT"
+          if [ -s build/parsersTests/protected.txt ]; then
+            echo "::error::This pull request changes files outside the parser sources, which the tests cannot vouch for: a person has to read them. They are listed in the summary of this run."
+            exit 1
+          fi
 
       # A failing test does not fail this step: what the failures amount to is decided in the next ones
       - name: Test them against their sites
-        if: steps.select.outputs.sources != ''
+        if: ${{ !cancelled() && steps.select.outputs.sources != '' }}
         env:
           SOURCES: ${{ steps.select.outputs.sources }}
         run: ./gradlew test --tests 'org.koitharu.kotatsu.parsers.MangaParserTest' "-PtestSources=$SOURCES"
@@ -67,7 +75,7 @@ jobs:
       # sites that no longer answer would take hours with all of them. A run that could not be made does not stop
       # the job: the summary then says those sources were not run, which is for a person to look at
       - name: Test the sources it removes, as master has them
-        if: steps.select.outputs.removed != ''
+        if: ${{ !cancelled() && steps.select.outputs.removed != '' }}
         env:
           REMOVED: ${{ steps.select.outputs.removed }}
         run: |
@@ -85,6 +93,7 @@ jobs:
 
       - name: Sum up
         id: summary
+        if: ${{ !cancelled() && steps.select.outputs.chosen == 'true' }}
         run: |
           ./gradlew summarizeParserTests
           cat build/parsersTests/summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -101,9 +110,13 @@ jobs:
           overwrite: true
 
       # Green only when everything that was tested passed. A failing source, one that Cloudflare kept from being
-      # tested, a change no test covers, or the removal of a source whose site is not shown to be gone is for a
-      # person to look at: the pull request can still be merged by hand
+      # tested, a change no test covers, the removal of a source whose site is not shown to be gone, or any change
+      # outside the parser sources (these tests, the build, this workflow, the core) is for a person to look at: the
+      # pull request can still be merged by hand. This is the pull request's own copy of the check, so one that changes
+      # the check can make it say anything. Such a change is to a file .github/CODEOWNERS owns, and the ruleset of
+      # master then waits for a code owner's approval, which no pull request can change
       - name: Say whether this can be merged as it is
+        if: ${{ !cancelled() && steps.select.outputs.chosen == 'true' }}
         env:
           VERDICT: ${{ steps.summary.outputs.verdict }}
         run: |
