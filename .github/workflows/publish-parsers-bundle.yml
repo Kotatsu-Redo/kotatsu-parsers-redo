@@ -5,7 +5,10 @@ name: Publish parsers bundle
 #
 # Runs by itself after every commit on master that changes what the parsers are made of, and can be run by
 # hand from the Actions tab: the parsers are built, checked for fitting the apps they are meant for, signed and
-# uploaded. When the commit was pushed or merged by the owner, or the run started by them, it goes straight
+# uploaded. Only when the code of the sources changed since the last publication: otherwise every app would
+# download the same parsers again, and the run ends without publishing anything, and without an error. A change
+# to the build or the core alone goes out with the next one. When the commit was pushed or merged by the owner,
+# or the run started by them, it goes straight
 # through. For anyone else it waits for a reviewer to approve it. Nothing is tested against the sites here.
 # That is done for every pull request, before it is merged, by pull-request.yml. See docs/BUNDLE.md.
 on:
@@ -58,9 +61,13 @@ jobs:
     if: github.ref == 'refs/heads/master' && github.repository == 'Kotatsu-Redo/kotatsu-parsers-redo'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # The whole history: the commit of the last publication is looked for in it
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -72,7 +79,20 @@ jobs:
       # master, and nothing of a pull request. The job that signs uses no cache at all
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
 
+      # The jobs below go on only if this says true. Nothing published yet, or a published commit that is not in
+      # the history any more, count as a change
+      - name: Tell whether the sources changed since the last publication
+        id: changed
+        run: |
+          ./gradlew checkSourcesChanged
+          changed=$(cat build/sourcesChanged.txt)
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" != true ]; then
+            echo "::notice::The code of the sources is the same as in the last publication, so nothing is published: every app would only download the same parsers again. Anything else this commit changed goes out with the next publication."
+          fi
+
       - name: Check that every source has its parser
+        if: steps.changed.outputs.changed == 'true'
         run: ./gradlew test --tests '*ParsersBundleTest'
 
   # For a run that somebody other than the owner started. The environment is what makes it wait: it has
@@ -85,7 +105,9 @@ jobs:
   # They start a new run, which is asked about afresh.
   confirm:
     needs: check
-    if: github.ref == 'refs/heads/master' && github.triggering_actor != 'clquwu' && github.run_attempt == 1
+    if: >-
+      github.ref == 'refs/heads/master' && needs.check.outputs.changed == 'true' &&
+      github.triggering_actor != 'clquwu' && github.run_attempt == 1
     runs-on: ubuntu-latest
     environment: parsers-bundle-review
     permissions:
@@ -106,7 +128,8 @@ jobs:
             exit 1
           fi
 
-  # Only what is on master, and only once the check above has passed. Either the owner started this attempt
+  # Only what is on master, only once the check above has passed, and only if it found the sources changed since
+  # the last publication. Either the owner started this attempt
   # of the run, and nobody has to be asked whatever happened in earlier attempts, or somebody else started
   # the run and a reviewer said yes to this, its first attempt. Anything else publishes nothing: a check that
   # failed, a run on another branch, a confirmation that was refused or never asked for, a run started again
@@ -119,7 +142,8 @@ jobs:
     needs: [check, confirm]
     if: >-
       ${{
-        !cancelled() && github.ref == 'refs/heads/master' && needs.check.result == 'success' && (
+        !cancelled() && github.ref == 'refs/heads/master' && needs.check.result == 'success' &&
+        needs.check.outputs.changed == 'true' && (
           github.triggering_actor == 'clquwu' ||
           (github.run_attempt == 1 && needs.confirm.result == 'success')
         )

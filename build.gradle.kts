@@ -6,6 +6,7 @@ import tasks.bundle.GenerateSigningKeyTask
 import tasks.bundle.ParsersApiTask
 import tasks.bundle.SignBundleTask
 import tasks.tests.CheckNewerThanPublishedTask
+import tasks.tests.CheckSourcesChangedTask
 import tasks.tests.SelectParserTestsTask
 import tasks.tests.SummarizeParserTestsTask
 import java.util.Properties
@@ -369,6 +370,17 @@ tasks.register<SummarizeParserTestsTask>("summarizeParserTests") {
     )
     removedResultsDir.set(parsersTestsDir.map { it.dir("removed") })
     outputDir.set(parsersTestsDir)
+}
+
+tasks.register<CheckSourcesChangedTask>("checkSourcesChanged") {
+    group = "verification"
+    description = "Writes build/sourcesChanged.txt: true if the code of the sources changed since the last " +
+        "publication, false if publishing would only send the same parsers again."
+    bundleUrl.set(parsersBundleUrl)
+    apiVersion.set(parsersApiVersion)
+    publicKey.set(providers.gradleProperty("parsersPublicKey"))
+    gitDir.set(providers.gradleProperty("parsersGitDir").orElse(projectDir.absolutePath))
+    outputFile.set(layout.buildDirectory.file("sourcesChanged.txt"))
 }
 
 tasks.register<CheckNewerThanPublishedTask>("checkNewerThanPublished") {
