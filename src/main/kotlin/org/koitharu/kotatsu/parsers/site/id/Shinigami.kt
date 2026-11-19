@@ -15,9 +15,9 @@ import java.util.*
 internal class Shinigami(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.SHINIGAMI, 24) {
 
-	override val configKeyDomain = ConfigKey.Domain("id.shinigami.asia")
-	private val apiSuffix = "api.shngm.io/v1"
-	private val cdnSuffix = "storage.shngm.id"
+	override val configKeyDomain = ConfigKey.Domain("s1.shinigami.mx")
+	private val apiSuffix = "api.shinigami.io/v1"
+	private val cdnSuffix = "cdn.shinigami.gg"
 
 	override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
 		super.onCreateConfig(keys)
@@ -28,6 +28,43 @@ internal class Shinigami(context: MangaLoaderContext) :
 		.add("referer", "https://$domain/")
 		.add("sec-fetch-dest", "empty")
 		.build()
+
+	override suspend fun resolveLink(resolver: LinkResolver, link: okhttp3.HttpUrl): Manga? {
+		val mangaId = link.pathSegments.getOrNull(1)
+			?.takeIf { link.pathSegments.firstOrNull() == "series" }
+			?: return null
+		val json = webClient.httpGet("https://$apiSuffix/manga/detail/$mangaId").parseJson()
+		val jo = json.getJSONObject("data")
+		val id = jo.getString("manga_id")
+		return Manga(
+			id = generateUid(id),
+			url = "/manga/detail/$id",
+			publicUrl = "https://$domain/series/$id",
+			title = jo.getString("title"),
+			altTitles = jo.getStringOrNull("alternative_title")
+				?.split('|')
+				?.map(String::trim)
+				?.filter(String::isNotEmpty)
+				?.toSet().orEmpty(),
+			coverUrl = jo.getStringOrNull("cover_image_url"),
+			largeCoverUrl = jo.getStringOrNull("cover_portrait_url")?.takeIf(String::isNotEmpty),
+			description = jo.getStringOrNull("description"),
+			authors = jo.optJSONObject("taxonomy")?.optJSONArray("Author")?.mapJSONToSet { it.getString("name") }.orEmpty(),
+			tags = jo.optJSONObject("taxonomy")?.optJSONArray("Genre")?.mapJSONToSet {
+				MangaTag(it.getString("slug"), it.getString("name"), source)
+			}.orEmpty(),
+			state = when (jo.getIntOrDefault("status", 0)) {
+				1 -> MangaState.ONGOING
+				2 -> MangaState.FINISHED
+				3 -> MangaState.PAUSED
+				else -> null
+			},
+			contentRating = null,
+			rating = RATING_UNKNOWN,
+			chapters = null,
+			source = source,
+		)
+	}
 
 	override val availableSortOrders: Set<SortOrder> = EnumSet.of(
 		SortOrder.POPULARITY,
@@ -67,9 +104,9 @@ internal class Shinigami(context: MangaLoaderContext) :
 			append("https://")
 			append(apiSuffix)
 			append("/manga/list")
-			append("?page=")
-			append(page.toString())
-			append("&page_size=")
+			append("?offset=")
+			append(((page - 1) * pageSize).toString())
+			append("&limit=")
 			append(pageSize)
 
 			append("&sort=")
@@ -116,29 +153,23 @@ internal class Shinigami(context: MangaLoaderContext) :
 			}
 
 			if (filter.tags.isNotEmpty()) {
-				append("&genre_include=")
+				append("&genre=")
 				filter.tags.joinTo(this, separator = ",") { it.key }
-				append("&genre_include_mode=and")
 			}
 
 			if (filter.tagsExclude.isNotEmpty()) {
 				append("&genre_exclude=")
 				filter.tagsExclude.joinTo(this, separator = ",") { it.key }
-				append("&genre_exclude_mode=and")
 			}
 
 			if (!filter.author.isNullOrEmpty()) {
 				append("&author=")
-				append(filter.author.lowercase().replace(' ', '-').urlEncoded())
+				append(filter.author.urlEncoded())
 			}
 
 			if (!filter.query.isNullOrEmpty()) {
 				append("&q=")
-				val encodedQuery = filter.query.splitByWhitespace()
-					.joinToString(separator = "+") { part ->
-						part.urlEncoded()
-					}
-				append(encodedQuery)
+				append(filter.query.urlEncoded())
 			}
 		}
 
@@ -152,9 +183,13 @@ internal class Shinigami(context: MangaLoaderContext) :
 				url = "/manga/detail/$id",
 				publicUrl = "https://$domain/series/$id",
 				title = jo.getString("title"),
-				altTitles = setOfNotNull(jo.getStringOrNull("alternative_title")),
+				altTitles = jo.getStringOrNull("alternative_title")
+					?.split('|')
+					?.map(String::trim)
+					?.filter(String::isNotEmpty)
+					?.toSet().orEmpty(),
 				coverUrl = jo.getStringOrNull("cover_image_url"),
-				largeCoverUrl = jo.getStringOrNull("cover_portrait_url"),
+				largeCoverUrl = jo.getStringOrNull("cover_portrait_url")?.takeIf(String::isNotEmpty),
 				authors = jo.optJSONObject("taxonomy")
 					?.optJSONArray("Author")
 					?.mapJSONToSet { x ->
@@ -189,6 +224,13 @@ internal class Shinigami(context: MangaLoaderContext) :
 		val id = jo.getString("manga_id")
 
 		return manga.copy(
+			title = jo.getString("title"),
+			altTitles = jo.getStringOrNull("alternative_title")
+				?.split('|')
+				?.map(String::trim)
+				?.filter(String::isNotEmpty)
+				?.toSet().orEmpty(),
+			coverUrl = jo.getStringOrNull("cover_image_url"),
 			tags = jo.optJSONObject("taxonomy")
 				?.optJSONArray("Genre")
 				?.mapJSONToSet { x ->
@@ -210,32 +252,43 @@ internal class Shinigami(context: MangaLoaderContext) :
 				else -> null
 			},
 			description = jo.getStringOrNull("description"),
-			largeCoverUrl = jo.getStringOrNull("cover_portrait_url"),
+			largeCoverUrl = jo.getStringOrNull("cover_portrait_url")?.takeIf(String::isNotEmpty),
 			chapters = getChapters(id),
 		)
 	}
 
 	private suspend fun getChapters(mangaId: String): List<MangaChapter> {
-		val url = "https://$apiSuffix/chapter/$mangaId/list?page=1&page_size=9999&sort_by=chapter_number&sort_order=asc"
-		val json = webClient.httpGet(url).parseJson()
-		val data = json.getJSONArray("data")
+		val chapters = ArrayList<MangaChapter>()
+		var cursor: String? = null
+		var hasNext: Boolean
+		do {
+			val url = buildString {
+				append("https://$apiSuffix/chapter/$mangaId/list?limit=100&sort=chapter_number&sort_order=asc")
+				cursor?.let { append("&cursor=").append(it) }
+			}
+			val json = webClient.httpGet(url).parseJson()
+			val data = json.getJSONArray("data")
+			chapters.addAll(data.mapJSON { jo ->
+				val chapterId = jo.getString("chapter_id")
+				val title = jo.getStringOrNull("chapter_title")?.takeIf(String::isNotEmpty)
 
-		return data.mapJSON { jo ->
-			val chapterId = jo.getString("chapter_id")
-			val title = jo.getStringOrNull("chapter_title")
-
-			MangaChapter(
-				id = generateUid(chapterId),
-				title = title,
-				number = jo.getFloatOrDefault("chapter_number", 0f),
-				url = "chapter/detail/$chapterId",
-				scanlator = null,
-				uploadDate = jo.getString("release_date").parseDate(),
-				branch = null,
-				source = source,
-				volume = 0,
-			)
-		}
+				MangaChapter(
+					id = generateUid(chapterId),
+					title = title,
+					number = jo.getFloatOrDefault("chapter_number", 0f),
+					url = "chapter/detail/$chapterId",
+					scanlator = null,
+					uploadDate = jo.getString("release_date").parseDate(),
+					branch = null,
+					source = source,
+					volume = 0,
+				)
+			})
+			val meta = json.optJSONObject("meta")
+			cursor = meta?.getStringOrNull("next_cursor")
+			hasNext = meta?.optBoolean("has_next") == true && !cursor.isNullOrEmpty() && data.length() > 0
+		} while (hasNext)
+		return chapters
 	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
@@ -243,11 +296,13 @@ internal class Shinigami(context: MangaLoaderContext) :
 		val data = json.getJSONObject("data")
 		val chapterData = data.getJSONObject("chapter")
 		val basePath = chapterData.getString("path")
+		val baseUrl = (data.getStringOrNull("base_url_low") ?: data.getStringOrNull("base_url"))
+			?.trimEnd('/') ?: "https://$cdnSuffix"
 		val datas = chapterData.getJSONArray("data")
 
 		return List(datas.length()) { i ->
 			val imgExt = datas.getString(i)
-			val imageUrl = "https://$cdnSuffix$basePath$imgExt"
+			val imageUrl = "$baseUrl$basePath$imgExt"
 
 			MangaPage(
 				id = generateUid(imageUrl),
@@ -259,7 +314,7 @@ internal class Shinigami(context: MangaLoaderContext) :
 	}
 
 	private suspend fun fetchTags(): Set<MangaTag> {
-		val json = webClient.httpGet("https://$apiSuffix/genre/list").parseJson()
+		val json = webClient.httpGet("https://$apiSuffix/taxonomy/list?type=genre&limit=100").parseJson()
 
 		return json.getJSONArray("data").mapJSONToSet { x ->
 			MangaTag(
