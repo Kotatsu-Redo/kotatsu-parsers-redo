@@ -184,6 +184,7 @@ internal class Voratoon(context: MangaLoaderContext) :
 		val chapter = loadPage(url, "chapter", "chapters").data.optJSONObject("chapter")
 			?: throw NotFoundException("No chapter in the page", url)
 		val images = chapter.optJSONObject("data")?.optJSONArray("images")?.asTypedList<String>().orEmpty()
+			.ifEmpty { if (chapter.has("pagesTicket")) loadImagesInReader(url, chapter.optLong("id")) else emptyList() }
 		return images.mapNotNull { it.trim().nullIfEmpty() }.distinct().map { imageUrl ->
 			MangaPage(
 				id = generateUid(imageUrl),
@@ -193,6 +194,33 @@ internal class Voratoon(context: MangaLoaderContext) :
 			)
 		}
 	}
+
+	/**
+	 * The page leaves a chapter's images out and gives a `pagesTicket` instead, which its reader trades for them once a
+	 * Cloudflare Turnstile check has run in the page: without one the site answers "Verifikasi keamanan diperlukan".
+	 * So they are read from the reader, in a WebView, once it shows them.
+	 */
+	private suspend fun loadImagesInReader(url: String, chapterId: Long): List<String> {
+		// Nothing showed up in time: the check most likely wants a person, who can do it in the browser
+		val raw = context.evaluateJs(url, readerImagesScript(chapterId), READER_TIMEOUT_MS)
+			?: context.requestBrowserAction(this, url)
+		// A string from a WebView arrives JSON-quoted
+		return JSONArray(JSONTokener(raw).nextValue() as? String ?: raw).asTypedList<String>()
+	}
+
+	// Runs repeatedly until it returns something: the reader's section of the chapter has no images until the ticket
+	// is traded. Later chapters are added below it as the reader is scrolled, each in a section of its own.
+	private fun readerImagesScript(chapterId: Long) = """
+		(() => {
+			const sections = [...document.querySelectorAll('[data-reader-chapter-id]')];
+			const section = sections.find((s) => s.getAttribute('data-reader-chapter-id') === '$chapterId') || sections[0];
+			if (!section) return null;
+			const images = [...section.querySelectorAll('img[data-chapter-page]')]
+				.map((img) => img.getAttribute('data-chapter-page'))
+				.filter((src) => src && /^https?:\/\//.test(src));
+			return images.length > 0 ? JSON.stringify([...new Set(images)]) : null;
+		})()
+	""".trimIndent()
 
 	private fun PageData.toManga(jo: JSONObject): Manga? {
 		val id = jo.optLong("id")
@@ -247,6 +275,8 @@ internal class Voratoon(context: MangaLoaderContext) :
 				.thenBy { it.uploadDate }
 				.thenBy { it.id },
 		)
+			// A chapter is opened by its number, and the site can list one number twice: both open the same pages
+			.distinctBy { it.url }
 	}
 
 	private fun parseChapterNumber(chapter: JSONObject): Float {
@@ -345,5 +375,6 @@ internal class Voratoon(context: MangaLoaderContext) :
 	private companion object {
 
 		const val PAYLOAD_PUSH = "self.__next_f.push("
+		const val READER_TIMEOUT_MS = 30_000L
 	}
 }
