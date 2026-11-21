@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers.site.madara.id
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
+import org.json.JSONTokener
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -34,14 +35,9 @@ internal class Mgkomik(context: MangaLoaderContext) :
 	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
 		.add("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
 		.add("Referer", "https://$domain/")
-		.apply {
-			val cookies = context.cookieJar.getCookies(domain)
-			val cfCookie = cookies.filter { it.name.startsWith("cf_") || it.name.startsWith("__cf") }
-				.joinToString("; ") { "${it.name}=${it.value}" }
-			if (cfCookie.isNotEmpty()) {
-				add("Cookie", cfCookie)
-			}
-		}
+		// cf_clearance is already carried by the host app's CookieJar (AndroidCookieJar
+		// reads WebView's CookieManager), so setting a manual Cookie header here would
+		// only duplicate/conflict with what OkHttp's BridgeInterceptor adds.
 		.build()
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
@@ -216,7 +212,7 @@ internal class Mgkomik(context: MangaLoaderContext) :
 	}
 
 	private suspend fun loadRenderedDocument(url: String, readySelector: String): Document {
-		val direct = runCatching {
+		val direct = runCatchingCancellable {
 			webClient.httpGet(url).parseHtml()
 		}.getOrNull()
 
@@ -241,9 +237,9 @@ internal class Mgkomik(context: MangaLoaderContext) :
 			})();
 		""".trimIndent()
 
-		val rawHtml = runCatching {
+		val rawHtml = runCatchingCancellable {
 			context.evaluateJs(url, script, 30000L)
-		}.getOrNull().orEmpty().decodeWebViewString()
+		}.getOrNull().orEmpty().let(::decodeWebViewString)
 
 		if (rawHtml == "CLOUDFLARE_BLOCKED") {
 			requestCloudflareVerification(url)
@@ -272,7 +268,7 @@ internal class Mgkomik(context: MangaLoaderContext) :
 		throw ParseException("Cloudflare verification is required. Open MgKomik in WebView and retry.", url, cause)
 	}
 
-	private fun isCloudflareChallengePage(html: String): Boolean {
+	internal fun isCloudflareChallengePage(html: String): Boolean {
 		if (html.isBlank()) return false
 		val lower = html.lowercase(Locale.US)
 		return lower.contains("<title>access denied") ||
@@ -286,23 +282,13 @@ internal class Mgkomik(context: MangaLoaderContext) :
 			lower.contains("/cdn-cgi/challenge-platform/") ||
 			lower.contains("challenge-platform") ||
 			lower.contains("challenges.cloudflare.com") ||
-			lower.contains("cf-turnstile") ||
-			lower.contains("cf-mitigated")
+			lower.contains("cf-turnstile")
+		// Note: `cf-mitigated` is a response header, never part of the HTML body.
 	}
 
-	private fun String.decodeWebViewString(): String {
-		if (length < 2 || first() != '"' || last() != '"') {
-			return this
-		}
-		return substring(1, lastIndex)
-			.replace("\\\"", "\"")
-			.replace("\\\\", "\\")
-			.replace("\\/", "/")
-			.replace("\\n", "\n")
-			.replace("\\r", "\r")
-			.replace("\\t", "\t")
-			.replace(Regex("""\\u([0-9A-Fa-f]{4})""")) { match ->
-				match.groupValues[1].toInt(16).toChar().toString()
-			}
-	}
+	internal fun decodeWebViewString(value: String): String = runCatchingCancellable {
+		// evaluateJs returns a JSON-encoded string; let org.json handle all escape
+		// sequences (\", \\, \/, \n, \uXXXX) in the correct order.
+		JSONTokener(value).nextValue() as? String ?: value
+	}.getOrDefault(value)
 }
