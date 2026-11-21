@@ -1,12 +1,16 @@
 package org.koitharu.kotatsu.parsers.site.mangareader.id
 
-import org.json.JSONObject
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withLock
+import okhttp3.Cookie
+import okhttp3.Interceptor
+import okhttp3.Response
+import okhttp3.internal.closeQuietly
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.site.mangareader.MangaReaderParser
 import org.koitharu.kotatsu.parsers.util.*
-import java.util.*
 
 @MangaSourceParser("KOMIKTAP", "KomikTap", "id", ContentType.HENTAI)
 internal class KomikTapParser(context: MangaLoaderContext) :
@@ -17,60 +21,43 @@ internal class KomikTapParser(context: MangaLoaderContext) :
 			isTagsExclusionSupported = false,
 		)
 
-	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-		val chapterUrl = chapter.url.toAbsoluteUrl(domain)
-		val docs = webClient.httpGet(chapterUrl).parseHtml()
-
-		val test = docs.select(selectTestScript)
-		if (test.isNullOrEmpty() and !encodedSrc) {
-			return docs.select(selectPage).map { img ->
-				val url = img.requireSrc().toRelativeUrl(domain)
-				MangaPage(
-					id = generateUid(url),
-					url = url,
-					preview = null,
-					source = source,
-				)
-			}
-		} else {
-			val images = if (encodedSrc) {
-				val script = docs.select(selectScript)
-				var decode = ""
-				for (i in script) {
-					if (i.attr("src").startsWith("data:text/javascript;base64,")) {
-						decode = Base64.getDecoder().decode(i.attr("src").replace("data:text/javascript;base64,", ""))
-							.decodeToString()
-						if (decode.startsWith("ts_reader.run")) {
-							break
-						}
-					}
-				}
-				JSONObject(decode.substringAfter('(').substringBeforeLast(')'))
-					.getJSONArray("sources")
-					.getJSONObject(0)
-					.getJSONArray("images")
-
-			} else {
-				val script = docs.selectFirstOrThrow(selectTestScript)
-				JSONObject(script.data().substringAfter('(').substringBeforeLast(')'))
-					.getJSONArray("sources")
-					.getJSONObject(0)
-					.getJSONArray("images")
-			}
-
-			val pages = ArrayList<MangaPage>(images.length())
-			for (i in 0 until images.length()) {
-				val url = images.getString(i)
-				pages.add(
-					MangaPage(
-						id = generateUid(url),
-						url = url,
-						preview = null,
-						source = source,
-					),
-				)
-			}
-			return pages
+	override fun intercept(chain: Interceptor.Chain): Response {
+		val response = chain.proceed(chain.request())
+		if (response.code != 307 && response.header("Server")?.contains("Sucuri", ignoreCase = true) != true) {
+			return response
 		}
+		if (response.mimeType?.endsWith("/html") == false) {
+			return response
+		}
+		val script = response.copy().parseHtml().select("script").firstNotNullOfOrNull { s ->
+			s.data().takeIf { it.contains("sucuri_cloudproxy_js") }
+		} ?: return response
+
+		val cookie = runBlocking {
+			mutex.withLock {
+				val wrappedScript = """
+					(function() {
+						var __cookie = "";
+						var __doc = {
+							set cookie(v) { __cookie = v; },
+							get cookie() { return __cookie; }
+						};
+						var __loc = { reload: function() {} };
+						var __e = function(code) {
+							return (new Function("document", "location", code))(__doc, __loc);
+						};
+						${script.replace("e=eval", "e=__e")}
+						return __cookie;
+					})();
+				""".trimIndent()
+				val cookieStr = context.evaluateJs("https://$domain/", wrappedScript, 10000L)
+					?.takeIf { it.isNotBlank() }
+				cookieStr?.let { Cookie.parse(response.request.url, it) }
+			}
+		} ?: return response
+
+		context.cookieJar.insertCookie(domain, cookie)
+		response.closeQuietly()
+		return chain.proceed(response.request.newBuilder().build())
 	}
 }
