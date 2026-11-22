@@ -7,7 +7,7 @@ import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
-import org.koitharu.kotatsu.parsers.core.SinglePageMangaParser
+import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.*
@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 
 @MangaSourceParser("FLAMECOMICS", "FlameComics", "en")
 internal class FlameComics(context: MangaLoaderContext) :
-	SinglePageMangaParser(context, MangaParserSource.FLAMECOMICS) {
+	PagedMangaParser(context, MangaParserSource.FLAMECOMICS, pageSize = 24) {
 
 	private val commonPrefix = suspendLazy(initializer = ::fetchBuildId)
 	private val removeSpecialCharsRegex = Regex("[^A-Za-z0-9 ]")
@@ -50,7 +50,7 @@ internal class FlameComics(context: MangaLoaderContext) :
 		keys.add(ConfigKey.UserAgent(context.getDefaultUserAgent()))
 	}
 
-	override suspend fun getList(order: SortOrder, filter: MangaListFilter): List<Manga> {
+	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
 		// browse.json carries everything the filters need (categories, year, ...); latest.json has none of it
 		// and is only used to put the series in the order of their latest updates
 		val browseList = fetchBrowseRaw()
@@ -82,7 +82,7 @@ internal class FlameComics(context: MangaLoaderContext) :
 		} else {
 			allManga
 		}
-		return when (order) {
+		val sorted = when (order) {
 			SortOrder.POPULARITY -> filtered.sortedBy { rawById[it.id]?.popularityRank ?: Int.MAX_VALUE }
 			SortOrder.UPDATED -> filtered
 			SortOrder.UPDATED_ASC -> filtered.reversed()
@@ -92,6 +92,8 @@ internal class FlameComics(context: MangaLoaderContext) :
 			SortOrder.ALPHABETICAL_DESC -> filtered.sortedByDescending { it.title.lowercase(sourceLocale) }
 			else -> filtered.sortedBy { it.title.lowercase(sourceLocale) }
 		}
+		// Paged: slice after all filtering/sorting — this is what fixes "Page 2 is empty" for auto-merge
+		return sorted.drop((page - 1) * pageSize).take(pageSize)
 	}
 
 	override suspend fun getDetails(manga: Manga): Manga = getDetailsImpl(manga.url.toLong())
