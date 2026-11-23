@@ -20,6 +20,7 @@ internal class ReadmangaParser(
 
         val domains = arrayOf(
             "a.zazaza.me",
+            "b.zazaza.me",
             "3.readmanga.ru",
         )
     }
