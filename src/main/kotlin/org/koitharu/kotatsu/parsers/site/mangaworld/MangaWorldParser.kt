@@ -13,6 +13,8 @@ internal abstract class MangaWorldParser(
 	context: MangaLoaderContext,
 	source: MangaParserSource,
 	domain: String,
+	// Host the app built chapter ids from before the site moved: keeping it keeps history, bookmarks and downloads valid.
+	private val legacyDomain: String,
 	pageSize: Int = 16,
 ) : PagedMangaParser(context, source, pageSize) {
 
@@ -94,7 +96,7 @@ internal abstract class MangaWorldParser(
 					when (it) {
 						MangaState.ONGOING -> append("&status=ongoing")
 						MangaState.FINISHED -> append("&status=completed")
-						MangaState.ABANDONED -> append("&status=dropped")
+						MangaState.ABANDONED -> append("&status=dropped&status=canceled")
 						MangaState.PAUSED -> append("&status=paused")
 						else -> {}
 					}
@@ -137,34 +139,33 @@ internal abstract class MangaWorldParser(
 	}
 
 	private fun parseMangaList(doc: Document): List<Manga> {
-		return doc.select(".comics-grid .entry").map { div ->
-			val href = div.selectFirstOrThrow("a.thumb").attrAsRelativeUrl("href")
-			val tags = div.select(".genres a[href*=/archive?genre=]")
+		return doc.select("article.card").map { div ->
+			val href = div.selectFirstOrThrow("a.card-cover").attrAsRelativeUrl("href")
+			val tags = div.select("a[href*=archive?genre=]")
 				.mapToSet {
-					val href = it.attr("href")
-					val genreKey = href.substringAfter("genre=").substringBefore("&")
+					val genreKey = it.attr("href").substringAfter("genre=").substringBefore("&")
 					MangaTag(
 						key = genreKey,
-						title = it.ownText().toTitleCase(sourceLocale),
+						title = it.text().toTitleCase(sourceLocale),
 						source = source
 					)
 				}
-			val author = div.selectFirst(".author a")?.text()
+			val author = div.selectFirst("a[href*=archive?author=]")?.text()
 			Manga(
 				id = generateUid(href),
 				url = href,
 				publicUrl = href.toAbsoluteUrl(domain),
-				coverUrl = div.selectFirst(".thumb img")?.attr("src"),
-				title = div.selectFirst(".name a.manga-title")?.text().orEmpty(),
+				coverUrl = div.selectFirst(".card-cover img")?.attrOrNull("src"),
+				title = div.selectFirst(".card-title")?.text().orEmpty(),
 				altTitles = emptySet(),
-				rating = RATING_UNKNOWN,
+				rating = div.selectFirst(".rating-chip strong")?.text()?.toFloatOrNull()?.div(10f) ?: RATING_UNKNOWN,
 				tags = tags,
 				authors = setOfNotNull(author),
 				state =
-					when (div.selectFirst(".status a")?.text()?.lowercase()) {
+					when (div.selectFirst(".card-tags .status")?.text()?.lowercase()) {
 						"in corso" -> MangaState.ONGOING
 						"finito" -> MangaState.FINISHED
-						"droppato" -> MangaState.ABANDONED
+						"droppato", "cancellato" -> MangaState.ABANDONED
 						"in pausa" -> MangaState.PAUSED
 						else -> null
 					},
@@ -177,7 +178,7 @@ internal abstract class MangaWorldParser(
 
 	private suspend fun fetchAvailableTags(): Set<MangaTag> {
 		val doc = webClient.httpGet("https://$domain/").parseHtml()
-		return doc.select("div[aria-labelledby=genresDropdown] a").mapToSet {
+		return doc.select(".dd-genres a[href*=genre=]").mapToSet {
 			MangaTag(
 				key = it.attr("href").substringAfterLast('='),
 				title = it.text().toTitleCase(sourceLocale),
@@ -189,28 +190,23 @@ internal abstract class MangaWorldParser(
 	override suspend fun getDetails(manga: Manga): Manga {
 		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
 		return manga.copy(
-			altTitles = setOfNotNull(
-				doc.selectFirst(".meta-data .font-weight-bold:contains(Titoli alternativi:)")
-					?.parent()
-					?.ownText()
-					?.substringAfter(": ")
-					?.trim()
-					?.nullIfEmpty(),
-			),
-			description = doc.getElementById("noidungm")?.text().orEmpty(),
+			altTitles = doc.selectFirst("p.manga-alt")?.ownText()?.split(", ")
+				?.mapNotNullToSet { it.trim().nullIfEmpty() }.orEmpty(),
+			description = doc.selectFirst(".manga-plot")?.text().orEmpty(),
 			chapters =
-				doc.select(".chapters-wrapper .chapter a").mapChapters(reversed = true) { i, a ->
-					val url = a.attrAsRelativeUrl("href").toAbsoluteUrl(domain)
+				doc.select(".ch-row a.ch").mapChapters(reversed = true) { i, a ->
+					val url = a.attrAsRelativeUrl("href").substringBefore('?')
 					MangaChapter(
-						id = generateUid(url),
-						title = a.selectFirst("span.d-inline-block")?.textOrNull(),
+						id = generateUid("https://$legacyDomain$url"),
+						title = a.selectFirst(".ch-name")?.textOrNull(),
 						number = i + 1f,
-						volume = 0,
+						volume = a.parents().firstOrNull { it.hasClass("volume") }
+							?.selectFirst(".volume-name")?.text()?.filter { it.isDigit() }?.toIntOrNull() ?: 0,
 						url = "$url?style=list",
 						scanlator = null,
 						uploadDate =
 							SimpleDateFormat("dd MMMM yyyy", Locale.ITALIAN).parseSafe(
-								a.selectFirst(".chap-date")?.text(),
+								a.selectFirst(".ch-date")?.text(),
 							),
 						branch = null,
 						source = source,
@@ -221,10 +217,7 @@ internal abstract class MangaWorldParser(
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val doc = webClient.httpGet(chapter.url.toAbsoluteUrl(domain)).parseHtml()
-		val selectWebtoonPages = "img.page-image"
-		val selectMangaPages = "img.img-fluid"
-		val imgSelector = if (doc.select(selectWebtoonPages).isNotEmpty()) selectWebtoonPages else selectMangaPages
-		return doc.select(imgSelector).map { img ->
+		return doc.select("img.reader-page").map { img ->
 			val urlPage = img.requireSrc().toRelativeUrl(domain)
 			MangaPage(
 				id = generateUid(urlPage),

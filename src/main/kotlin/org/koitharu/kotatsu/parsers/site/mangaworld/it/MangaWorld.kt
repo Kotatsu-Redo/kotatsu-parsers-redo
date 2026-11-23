@@ -8,4 +8,4 @@ import org.koitharu.kotatsu.parsers.site.mangaworld.MangaWorldParser
 @MangaSourceParser("MANGAWORLD", "MangaWorld", "it")
 internal class MangaWorld(
 	context: MangaLoaderContext,
-) : MangaWorldParser(context, MangaParserSource.MANGAWORLD, "mangaworld.mx")
+) : MangaWorldParser(context, MangaParserSource.MANGAWORLD, "www.mangaworld.me", "mangaworld.mx")
