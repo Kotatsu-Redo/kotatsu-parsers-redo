@@ -15,6 +15,8 @@ import org.koitharu.kotatsu.parsers.newRawParser
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
 import java.util.Locale
 
+internal class LinkResolutionUnsupportedException(message: String) : RuntimeException(message)
+
 public class LinkResolver internal constructor(
 	private val context: MangaLoaderContext,
 	public val link: HttpUrl,
@@ -32,7 +34,12 @@ public class LinkResolver internal constructor(
 		for (candidate in ranked.takeWhile { it.score == best.score }) {
 			candidate.source.newRawParser(context).resolveLinkOrNull()?.let { return it }
 		}
-		return resolveManga(best.source.newParser(context))
+		return try {
+			resolveManga(best.source.newParser(context))
+		} catch (_: LinkResolutionUnsupportedException) {
+			// A matching host may also serve routes this parser does not support.
+			null
+		}
 	}
 
 	/**

@@ -1,7 +1,10 @@
 package org.koitharu.kotatsu.parsers.site.en
 
 import androidx.collection.ArraySet
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -12,7 +15,9 @@ import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import org.koitharu.kotatsu.parsers.util.json.*
 import org.koitharu.kotatsu.parsers.util.suspendlazy.suspendLazy
+import java.text.Normalizer
 import java.util.EnumSet
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 @MangaSourceParser("FLAMECOMICS", "FlameComics", "en")
@@ -20,7 +25,15 @@ internal class FlameComics(context: MangaLoaderContext) :
 	PagedMangaParser(context, MangaParserSource.FLAMECOMICS, pageSize = 24) {
 
 	private val commonPrefix = suspendLazy(initializer = ::fetchBuildId)
-	private val removeSpecialCharsRegex = Regex("[^A-Za-z0-9 ]")
+	private val combiningMarksRegex = Regex("\\p{M}+")
+	private val removeSpecialCharsRegex = Regex("[^\\p{L}\\p{N}\\s]")
+	private val whitespaceRegex = Regex("\\s+")
+	private val cacheMutex = Mutex()
+	private val catalogCacheTtlNanos = TimeUnit.MINUTES.toNanos(1)
+	private var browseCache: List<Raw>? = null
+	private var browseCacheAtNanos = 0L
+	private var latestRanksCache: Map<Long, Int>? = null
+	private var latestRanksCacheAtNanos = 0L
 
 	override val configKeyDomain = ConfigKey.Domain("flamecomics.xyz")
 
@@ -28,7 +41,6 @@ internal class FlameComics(context: MangaLoaderContext) :
 		SortOrder.POPULARITY,
 		SortOrder.UPDATED,
 		SortOrder.NEWEST,
-		SortOrder.RATING,
 		SortOrder.ALPHABETICAL,
 		SortOrder.ALPHABETICAL_DESC,
 	)
@@ -51,52 +63,71 @@ internal class FlameComics(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		// browse.json carries everything the filters need (categories, year, ...); latest.json has none of it
-		// and is only used to put the series in the order of their latest updates
-		val browseList = fetchBrowseRaw()
+		// browse.json carries categories, year and other filter data; latest.json provides update ordering.
+		val browseList = getBrowseRawCached()
 		val rawList = if (order == SortOrder.UPDATED || order == SortOrder.UPDATED_ASC) {
-			val ranks = fetchLatestRanks()
+			val ranks = getLatestRanksCached()
 			browseList.sortedBy { raw -> raw.json.seriesIdOrNull()?.let { ranks[it] } ?: Int.MAX_VALUE }
 		} else {
 			browseList
 		}
-		val rawById = HashMap<Long, Raw>(rawList.size)
-		val allManga = rawList.mapNotNull { raw ->
+		val normalizedQuery = filter.query?.takeIf { it.isNotBlank() }?.normalizeTitle()
+		val compactQuery = normalizedQuery?.filterNot { it.isWhitespace() }.orEmpty()
+		// Both forms let punctuation/spacing variants such as "One-Piece" and "One Piece" match.
+		// browse.json omits altTitles; avoid fetching every detail page just to search aliases.
+		val matchingManga = rawList.mapNotNull { raw ->
 			val manga = parseManga(raw.json) ?: return@mapNotNull null
-			// the site lists some series more than once
-			if (rawById.containsKey(manga.id)) return@mapNotNull null
-			rawById[manga.id] = raw
-			if (!manga.tags.matchesFilter(filter, raw)) return@mapNotNull null
+			if (!manga.tags.matchesFilter(filter)) return@mapNotNull null
 			if (!raw.matchesState(filter)) return@mapNotNull null
 			if (!raw.matchesType(filter)) return@mapNotNull null
 			if (!raw.matchesYear(filter)) return@mapNotNull null
-			manga
-		}
-		val filtered = if (!filter.query.isNullOrEmpty()) {
-			val normalizedQuery = filter.query.normalizeTitle()
-			allManga.filter { manga ->
-				val titles = mutableListOf(manga.title)
-				titles.addAll(manga.altTitles)
-				titles.any { normalizedQuery in it.normalizeTitle() }
+			if (normalizedQuery != null) {
+				if (normalizedQuery.isEmpty()) return@mapNotNull null
+				val titles = listOf(manga.title) + manga.altTitles
+				if (titles.none { title ->
+					val normalizedTitle = title.normalizeTitle()
+					normalizedQuery in normalizedTitle ||
+						compactQuery in normalizedTitle.filterNot { it.isWhitespace() }
+				}) return@mapNotNull null
 			}
-		} else {
-			allManga
-		}
+			manga to raw
+		}.distinctBy { (manga, _) -> manga.id }
+		val rawById = matchingManga.associate { (manga, raw) -> manga.id to raw }
+		val filtered = matchingManga.map { it.first }
 		val sorted = when (order) {
 			SortOrder.POPULARITY -> filtered.sortedBy { rawById[it.id]?.popularityRank ?: Int.MAX_VALUE }
 			SortOrder.UPDATED -> filtered
 			SortOrder.UPDATED_ASC -> filtered.reversed()
 			SortOrder.NEWEST -> filtered.sortedByDescending { rawById[it.id]?.time ?: 0L }
-			SortOrder.RATING -> filtered.sortedByDescending { rawById[it.id]?.likes ?: 0 }
 			SortOrder.ALPHABETICAL -> filtered.sortedBy { it.title.lowercase(sourceLocale) }
 			SortOrder.ALPHABETICAL_DESC -> filtered.sortedByDescending { it.title.lowercase(sourceLocale) }
 			else -> filtered.sortedBy { it.title.lowercase(sourceLocale) }
 		}
-		// Paged: slice after all filtering/sorting — this is what fixes "Page 2 is empty" for auto-merge
+		// Slice only after filtering and sorting so later pages remain populated.
 		return sorted.drop((page - 1) * pageSize).take(pageSize)
 	}
 
-	override suspend fun getDetails(manga: Manga): Manga = getDetailsImpl(manga.url.toLong())
+	override suspend fun getDetails(manga: Manga): Manga {
+		val seriesId = manga.url.toSeriesIdOrNull()
+			?: throw LinkResolutionUnsupportedException("Unsupported FlameComics manga URL: ${manga.url}")
+		return getDetailsImpl(seriesId)
+	}
+
+	private fun String.toSeriesIdOrNull(): Long? {
+		toLongOrNull()?.let { return it }
+		val parsedUrl = toHttpUrlOrNull()
+		if (parsedUrl != null) {
+			if (parsedUrl.host.removePrefix("www.") != domain.removePrefix("www.")) return null
+			return parsedUrl.pathSegments
+				.takeIf { it.firstOrNull() == "series" }
+				?.getOrNull(1)
+				?.toLongOrNull()
+		}
+		return substringBefore('?').substringBefore('#').trim('/').split('/')
+			.takeIf { it.firstOrNull() == "series" }
+			?.getOrNull(1)
+			?.toLongOrNull()
+	}
 
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
 		val (seriesId, token) = chapter.url.split('?')
@@ -110,22 +141,27 @@ internal class FlameComics(context: MangaLoaderContext) :
 			.addQueryParameter("id", seriesId)
 			.addQueryParameter("token", token)
 			.build()
-		val json = webClient.httpGet(url).parseJson().getJSONObject("pageProps")
+		val images = webClient.httpGet(url).parseJson().getJSONObject("pageProps")
 			.getJSONObject("chapter")
 			.getJSONObject("images")
 			.entries<JSONObject>()
-		return json.map { (i, jo) ->
+			.sortedBy { it.key.toIntOrNull() ?: Int.MAX_VALUE }
+		return images.map { (index, image) ->
+			val imagePath = token + "/" + image.getString("name")
 			MangaPage(
-				id = generateUid("$i|$token"),
-				url = imageUrl(seriesId, token + "/" + jo.getString("name"), 1920),
-				preview = imageUrl(seriesId, token + "/" + jo.getString("name"), 128),
+				id = generateUid("$index|$token"),
+				url = imageUrl(seriesId, imagePath, 1920),
+				preview = imageUrl(seriesId, imagePath, 384),
 				source = source,
 			)
 		}
 	}
 
 	override suspend fun resolveLink(resolver: LinkResolver, link: HttpUrl): Manga? {
-		val seriesId = link.pathSegments.lastOrNull()?.toLongOrNull() ?: return null
+		if (link.host.removePrefix("www.") != domain.removePrefix("www.")) return null
+		val segments = link.pathSegments
+		if (segments.firstOrNull() != "series") return null
+		val seriesId = segments.getOrNull(1)?.toLongOrNull() ?: return null
 		return getDetailsImpl(seriesId)
 	}
 
@@ -143,7 +179,6 @@ internal class FlameComics(context: MangaLoaderContext) :
 			ContentType.MANHWA,
 			ContentType.MANHUA,
 			ContentType.COMICS,
-			ContentType.NOVEL,
 		),
 	)
 
@@ -154,7 +189,9 @@ internal class FlameComics(context: MangaLoaderContext) :
 			try {
 				val id = JSONObject(nextData).getString("buildId")
 				if (id.isNotEmpty()) return id
-			} catch (_: Exception) { }
+			} catch (_: Exception) {
+				// Fall back to the build manifest reference in the document.
+			}
 		}
 		val raw = doc.html()
 		val regex = Regex("/_next/static/([^/]+)/_buildManifest\\.js")
@@ -184,12 +221,16 @@ internal class FlameComics(context: MangaLoaderContext) :
 	private data class Raw(
 		val json: JSONObject,
 		val popularityRank: Int = json.optInt("popularityRank", Int.MAX_VALUE),
-		val lastEdit: Long = json.optLong("last_edit", 0L),
 		val time: Long = json.optLong("time", 0L),
-		val likes: Int = json.optInt("likes", 0),
 		val year: Int = json.optInt("year", 0),
 		val status: String = json.optString("status", ""),
 		val type: String = json.optString("type", ""),
+	)
+
+	private data class OrderedChapter(
+		val number: Float?,
+		val sourceIndex: Int,
+		val chapter: MangaChapter,
 	)
 
 	private suspend fun fetchBrowseRaw(): List<Raw> {
@@ -203,7 +244,20 @@ internal class FlameComics(context: MangaLoaderContext) :
 		return arr.mapJSON { Raw(it) }
 	}
 
-	/** Position of each series in latest.json (first occurrence wins), 0 being the most recently updated */
+	private suspend fun getBrowseRawCached(): List<Raw> = cacheMutex.withLock {
+		val now = System.nanoTime()
+		val cached = browseCache
+		if (cached != null && now - browseCacheAtNanos < catalogCacheTtlNanos) {
+			cached
+		} else {
+			fetchBrowseRaw().also {
+				browseCache = it
+				browseCacheAtNanos = System.nanoTime()
+			}
+		}
+	}
+
+	/** Position of each series in latest.json (first occurrence wins), zero being most recently updated. */
 	private suspend fun fetchLatestRanks(): Map<Long, Int> {
 		val url = urlBuilder()
 			.addPathSegment("_next")
@@ -219,22 +273,28 @@ internal class FlameComics(context: MangaLoaderContext) :
 		return ranks
 	}
 
-	private suspend fun fetchAvailableTags(): Set<MangaTag> {
-		val url = urlBuilder()
-			.addPathSegment("_next")
-			.addPathSegment("data")
-			.addPathSegment(commonPrefix.get())
-			.addPathSegment("browse.json")
-			.build()
-		return webClient.httpGet(url).parseJson()
-			.getJSONObject("pageProps")
-			.getJSONArray("series")
-			.mapJSON { it.extractCategories() }
-			.flatMapTo(ArraySet<String>()) { it }
-			.mapToSet { it.toMangaTag() }
+	private suspend fun getLatestRanksCached(): Map<Long, Int> = cacheMutex.withLock {
+		val now = System.nanoTime()
+		val cached = latestRanksCache
+		if (cached != null && now - latestRanksCacheAtNanos < catalogCacheTtlNanos) {
+			cached
+		} else {
+			fetchLatestRanks().also {
+				latestRanksCache = it
+				latestRanksCacheAtNanos = System.nanoTime()
+			}
+		}
 	}
 
+	private suspend fun fetchAvailableTags(): Set<MangaTag> = getBrowseRawCached()
+		.flatMapTo(ArraySet<String>()) { it.json.extractCategories() }
+		.mapToSet { it.toMangaTag() }
+
 	private fun parseManga(jo: JSONObject): Manga? {
+		// Novel rows are excluded even if a future feed gives them a series_id.
+		val type = jo.getStringOrNull("type")?.trim()?.lowercase()
+		if (type == "novel" || type == "web novel") return null
+
 		val seriesId = jo.seriesIdOrNull() ?: return null
 		val cover = jo.getStringOrNull("cover")
 		val authors = jo.extractStringList("author")
@@ -244,7 +304,11 @@ internal class FlameComics(context: MangaLoaderContext) :
 			id = generateUid(seriesId),
 			title = jo.getString("title"),
 			altTitles = jo.getStringOrNull("altTitles")?.let { str ->
-				try { JSONArray(str).toStringSet() } catch (_: Exception) { emptySet() }
+				try {
+					JSONArray(str).toStringSet()
+				} catch (_: Exception) {
+					emptySet()
+				}
 			}.orEmpty(),
 			url = seriesId.toString(),
 			publicUrl = "https://${domain}/series/$seriesId",
@@ -272,26 +336,35 @@ internal class FlameComics(context: MangaLoaderContext) :
 		val json = webClient.httpGet(url).parseJson().getJSONObject("pageProps")
 		val series = json.getJSONObject("series")
 		val chapters = json.getJSONArray("chapters")
-		return (parseManga(series) ?: throw IllegalStateException("Invalid series $seriesId")).copy(
-			chapters = chapters.mapJSON { jo ->
-				val chapterId = jo.getLong("chapter_id")
-				val number = jo.getFloatOrDefault("chapter", 0f)
-				MangaChapter(
+		val manga = parseManga(series) ?: throw IllegalStateException("Invalid manga series $seriesId")
+		val orderedChapters = chapters.mapJSONIndexed { index, jo ->
+			val number = jo.getFloatOrDefault("chapter", Float.NaN).takeIf { it.isFinite() }
+			val chapterId = jo.getLong("chapter_id")
+			val title = jo.getStringOrNull("name")?.takeIf { it.isNotBlank() }
+				?: jo.getStringOrNull("title")?.takeIf { it.isNotBlank() }
+			OrderedChapter(
+				number = number,
+				sourceIndex = index,
+				chapter = MangaChapter(
 					id = generateUid(longOf(seriesId.toInt(), chapterId.toInt())),
-					title = jo.getStringOrNull("name")?.takeIf { it.isNotBlank() } ?: jo.getStringOrNull("title"),
-					number = number,
+					title = title ?: if (number == null) "Unnumbered chapter" else null,
+					number = number ?: 0f,
 					volume = 0,
 					url = seriesId.toString() + "?" + jo.getStringOrNull("token").orEmpty(),
 					scanlator = null,
 					uploadDate = TimeUnit.SECONDS.toMillis(jo.getLongOrDefault("release_date", 0L)),
 					branch = jo.getStringOrNull("language"),
 					source = source,
-				)
-			}.sortedByDescending { it.uploadDate },
-		)
+				),
+			)
+		}.sortedWith(
+			compareBy<OrderedChapter> { it.number ?: Float.POSITIVE_INFINITY }
+				.thenBy { it.sourceIndex },
+		).map { it.chapter }
+		return manga.copy(chapters = orderedChapters)
 	}
 
-	private fun Set<MangaTag>.matchesFilter(filter: MangaListFilter, raw: Raw): Boolean {
+	private fun Set<MangaTag>.matchesFilter(filter: MangaListFilter): Boolean {
 		if (filter.tags.isNotEmpty() && !containsAll(filter.tags)) return false
 		for (tag in filter.tagsExclude) if (contains(tag)) return false
 		return true
@@ -305,8 +378,8 @@ internal class FlameComics(context: MangaLoaderContext) :
 
 	private fun Raw.matchesType(filter: MangaListFilter): Boolean {
 		if (filter.types.isEmpty()) return true
-		val ct = type.toContentType() ?: return false
-		return ct in filter.types
+		val contentType = type.toContentType() ?: return false
+		return contentType in filter.types
 	}
 
 	private fun Raw.matchesYear(filter: MangaListFilter): Boolean {
@@ -328,7 +401,7 @@ internal class FlameComics(context: MangaLoaderContext) :
 		"manhwa" -> ContentType.MANHWA
 		"manhua" -> ContentType.MANHUA
 		"comic", "comics" -> ContentType.COMICS
-		"novel", "web novel" -> ContentType.NOVEL
+		"novel", "web novel" -> null
 		"russian" -> ContentType.OTHER
 		else -> ContentType.OTHER
 	}
@@ -341,13 +414,15 @@ internal class FlameComics(context: MangaLoaderContext) :
 			?: getLongOrDefault("seriesId", -1L).takeIf { it != -1L }
 			?: getStringOrNull("seriesId")?.toLongOrNull()
 
-	/**
-	 * The list endpoints (browse.json) call them "categories", the series page calls them "tags"
-	 */
+	/** The list endpoint calls these categories; the series endpoint may call them tags. */
 	private fun JSONObject.extractCategories(): Set<String> {
 		for (key in arrayOf("categories", "tags")) {
 			val arr = optJSONArray(key) ?: getStringOrNull(key)?.let { str ->
-				try { JSONArray(str) } catch (_: Exception) { null }
+				try {
+					JSONArray(str)
+				} catch (_: Exception) {
+					null
+				}
 			} ?: continue
 			return arr.toTagNames()
 		}
@@ -369,17 +444,26 @@ internal class FlameComics(context: MangaLoaderContext) :
 	}
 
 	private fun JSONObject.extractStringList(key: String): Set<String> {
-		optJSONArray(key)?.let { return it.asTypedList<String>().filter { it.isNotBlank() }.toSet() }
-		getStringOrNull(key)?.let { if (it.isNotBlank()) return setOf(it) }
-		getStringOrNull(key)?.let { str ->
-			if (str.startsWith("[")) {
-				try { return JSONArray(str).asTypedList<String>().toSet() } catch (_: Exception) {}
+		optJSONArray(key)?.let { array ->
+			return array.asTypedList<String>().filter { it.isNotBlank() }.toSet()
+		}
+		val value = getStringOrNull(key)?.takeIf { it.isNotBlank() } ?: return emptySet()
+		if (value.trimStart().startsWith("[")) {
+			try {
+				return JSONArray(value).asTypedList<String>().filter { it.isNotBlank() }.toSet()
+			} catch (_: Exception) {
+				// Treat malformed JSON as a single author value below.
 			}
 		}
-		return emptySet()
+		return setOf(value)
 	}
 
-	private fun String.normalizeTitle() = removeSpecialCharsRegex.replace(lowercase(), "")
+	private fun String.normalizeTitle(): String {
+		val decomposed = Normalizer.normalize(lowercase(Locale.ROOT), Normalizer.Form.NFKD)
+		val withoutMarks = combiningMarksRegex.replace(decomposed, "")
+		val cleaned = removeSpecialCharsRegex.replace(withoutMarks, " ")
+		return whitespaceRegex.replace(cleaned, " ").trim()
+	}
 
 	private fun String.toMangaTag() = MangaTag(
 		title = this.toTitleCase(sourceLocale),
