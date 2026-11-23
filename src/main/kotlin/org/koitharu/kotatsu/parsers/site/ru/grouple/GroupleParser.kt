@@ -88,7 +88,26 @@ internal abstract class GroupleParser(
 
     override suspend fun getFilterOptions() = MangaListFilterOptions(
         availableTags = fetchAvailableTags(),
-        availableStates = EnumSet.of(MangaState.FINISHED, MangaState.ABANDONED, MangaState.UPCOMING),
+        availableStates = EnumSet.of(
+            MangaState.ONGOING,
+            MangaState.FINISHED,
+            MangaState.ABANDONED,
+            MangaState.UPCOMING,
+        ),
+        availableContentTypes = EnumSet.of(
+            ContentType.MANGA,
+            ContentType.MANHWA,
+            ContentType.MANHUA,
+            ContentType.ONE_SHOT,
+            ContentType.DOUJINSHI,
+            ContentType.COMICS,
+            ContentType.OTHER,
+        ),
+        availableContentRating = EnumSet.of(
+            ContentRating.SAFE,
+            ContentRating.SUGGESTIVE,
+            ContentRating.ADULT,
+        ),
     )
 
     override suspend fun getList(offset: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
@@ -116,11 +135,15 @@ internal abstract class GroupleParser(
     override suspend fun getDetails(manga: Manga): Manga {
         val response = webClient.httpGet(manga.url.toAbsoluteUrl(domain))
         val doc = response.parseHtml()
-        val root = doc.body().requireElementById("mangaBox").run {
+        val detailsRoot = doc.body().selectFirst("div.cr-hero-container")
+        val legacyRoot = doc.body().requireElementById("mangaBox").run {
             selectFirst("div.leftContent") ?: this
         }
+        val root = detailsRoot ?: legacyRoot
+        val newEngine = detailsRoot != null
         val dateFormat = SimpleDateFormat("dd.MM.yy", Locale.US)
         val coverImg = root.selectFirst("div.subject-cover")?.selectFirst("img")
+        val newCover = detailsRoot?.selectFirst("img.cr-hero-poster__img")
         val translations = if (config[splitTranslationsKey]) {
             root.selectFirst("div.translator-selection")
                 ?.select(".translator-selection-item")
@@ -131,15 +154,23 @@ internal abstract class GroupleParser(
             null
         }
         val newSource = getSource(response.request.url)
-        val chaptersList = root.getElementById("chapters-list")
+        val chaptersList = doc.body().getElementById("chapters-list") ?: root.getElementById("chapters-list")
         var isRestricted = false
-        if (chaptersList == null && root.getElementsContainingOwnText(NO_CHAPTERS).isEmpty()) {
+        if (!newEngine && chaptersList == null && root.getElementsContainingOwnText(NO_CHAPTERS).isEmpty()) {
             if (root.getElementsContainingOwnText(COPYRIGHT_ALERT).isNotEmpty()) {
                 isRestricted = true
             } else {
                 root.parseFailed("No chapters found")
             }
         }
+        val newProductionStatus = detailsRoot?.selectFirst("[data-production-status]")
+            ?.attr("data-production-status")
+        val newRating = detailsRoot?.selectFirst(".cr-hero-rating__item--main .cr-hero-rating__value")
+            ?.textOrNull()?.toFloatOrNull()?.div(10f)
+        val newDescription = detailsRoot?.selectFirst(".cr-description__content")?.html()
+        val newAuthors = detailsRoot?.select(".cr-main-person-item")?.mapNotNullToSet { item ->
+            item.selectFirst(".cr-main-person-item__name")?.textOrNull()
+        }.orEmpty()
         val hashRegex = Regex("window.user_hash\\s*=\\s*\'([^\']+)\'")
         val userHash = doc.select("script").firstNotNullOfOrNull { it.html().findGroupValue(hashRegex) }
         val hasNsfwAlert = root.select(".alert-warning").any { it.ownText().contains(NSFW_ALERT) }
@@ -156,11 +187,14 @@ internal abstract class GroupleParser(
                 "a[href*='/tag/']",
         ) + doc.select(".cr-tags a.cr-tags__item")
         val tags = tagLinks.mapNotNullTo(manga.tags.toMutableSet()) { a ->
+            val tagHref = a.attrOrNull("href").orEmpty()
+            val isUserTag = "/list/tag/" in tagHref || "/tag/" in tagHref
             val title = a.textOrNull()
                 ?.replace("#", "")
                 ?.trim()
                 ?.toTitleCase()
                 ?.takeIf { it.isNotEmpty() }
+                ?.let { if (isUserTag) "#$it" else it }
                 ?: return@mapNotNullTo null
             val href = a.attrOrNull("href")
             val key = when {
@@ -187,21 +221,39 @@ internal abstract class GroupleParser(
                 it.textOrNull()
             } ?: manga.altTitles,
             publicUrl = response.request.url.toString(),
-            description = root.selectFirst("div.manga-description")?.html(),
+            description = newDescription ?: root.selectFirst("div.manga-description")?.html(),
+            rating = newRating ?: manga.rating,
             largeCoverUrl = coverImg?.attrAsAbsoluteUrlOrNull("data-full"),
             coverUrl = manga.coverUrl
+                ?: newCover?.attrAsAbsoluteUrlOrNull("src")
                 ?: coverImg?.attrAsAbsoluteUrlOrNull("data-thumb")?.replace("_p.", "."),
             tags = tags,
-            state = if (isRestricted) {
-                MangaState.RESTRICTED
-            } else {
-                manga.state
+            state = when {
+                isRestricted -> MangaState.RESTRICTED
+                newProductionStatus != null -> when (newProductionStatus) {
+                    "FINISHED" -> MangaState.FINISHED
+                    "PROGRESS" -> MangaState.ONGOING
+                    "ABANDONED", "ABANDONED_POPULAR" -> MangaState.ABANDONED
+                    "UPCOMING", "WAIT_UPLOAD" -> MangaState.UPCOMING
+                    "PAUSED" -> MangaState.PAUSED
+                    else -> manga.state
+                }
+                else -> manga.state
             },
-            authors = root.select(".elem_author,.elem_illustrator,.elem_screenwriter")
-                .select("a.person-link")
-                .mapNotNullToSet { it.textOrNull() } + manga.authors,
-            contentRating = (if (hasNsfwAlert) ContentRating.SUGGESTIVE else ContentRating.SAFE)
-                .coerceAtLeast(manga.contentRating ?: ContentRating.SAFE),
+            authors = newAuthors.ifEmpty {
+                root.select(".elem_author,.elem_illustrator,.elem_screenwriter")
+                    .select("a.person-link")
+                    .mapNotNullToSet { it.textOrNull() }
+            } + manga.authors,
+            contentRating = if (newEngine) {
+                when (detailsRoot?.selectFirst("a[href*='/list/limitation/']")?.textOrNull()?.trim()) {
+                    "PG-13", "R", "NC-17" -> ContentRating.SUGGESTIVE
+                    else -> ContentRating.SAFE
+                }
+            } else {
+                (if (hasNsfwAlert) ContentRating.SUGGESTIVE else ContentRating.SAFE)
+                    .coerceAtLeast(manga.contentRating ?: ContentRating.SAFE)
+            },
             chapters = (
                 chaptersList?.select("tr.item-row")?.takeIf { it.isNotEmpty() }
                     ?: chaptersList?.select("a.chapter-link")
@@ -385,13 +437,23 @@ internal abstract class GroupleParser(
     }
 
     private suspend fun fetchAvailableTags(): Set<MangaTag> {
-        val doc = webClient.httpGet("https://${domain}/list/genres/sort_name").parseHtml()
-        val root = doc.body().getElementById("mangaBox")?.selectFirst("div.leftContent")?.selectFirst("table.table")
-            ?: doc.parseFailed("Cannot find root")
-        return root.select("a.element-link").mapToSet { a ->
+        val genres = fetchTagLinks("https://${domain}/list/genres/sort_name", prefix = "")
+        val tags = fetchTagLinks("https://${domain}/list/tags/sort_name", prefix = "#")
+        return genres + tags
+    }
+
+    private suspend fun fetchTagLinks(url: String, prefix: String): Set<MangaTag> {
+        val doc = webClient.httpGet(url).parseHtml()
+        return doc.select("a.element-link[href*='/list/']").mapToSet { a ->
+            val href = a.attr("href")
+            val key = when {
+                "/list/genre/" in href -> href.substringAfter("/list/genre/").substringBefore('/').substringBefore('?')
+                "/list/tag/" in href -> href.substringAfter("/list/tag/").substringBefore('/').substringBefore('?')
+                else -> href.removeSuffix('/').substringAfterLast('/').substringBefore('?')
+            }
             MangaTag(
-                title = a.text().toTitleCase(),
-                key = a.attr("href").substringAfterLast('/'),
+                title = prefix + a.text().toTitleCase(),
+                key = key,
                 source = source,
             )
         }
@@ -463,7 +525,7 @@ internal abstract class GroupleParser(
     }
 
     private suspend fun advancedSearch(offset: Int, order: SortOrder, filter: MangaListFilter): Response {
-        val tagsMap = if (filter.tags.isEmpty() && filter.tagsExclude.isEmpty()) {
+        val tagsMap = if (filter.tags.isEmpty() && filter.tagsExclude.isEmpty() && filter.types.isEmpty() && filter.contentRating.isEmpty()) {
             null
         } else {
             tagsIndex.get()
@@ -474,11 +536,15 @@ internal abstract class GroupleParser(
         url.addQueryParameter("q", filter.query)
         url.addQueryParameter("offset", offset.toString())
         filter.tags.forEach { tag ->
-            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.removePrefix("#").lowercase(Locale.ROOT))) {
+                "Tag ${tag.title} not found"
+            }
             url.addQueryParameter(tagId, "in")
         }
         filter.tagsExclude.forEach { tag ->
-            val tagId = requireNotNull(tagsMap?.get(tag.title.lowercase())) { "Tag ${tag.title} not found" }
+            val tagId = requireNotNull(tagsMap?.get(tag.title.removePrefix("#").lowercase(Locale.ROOT))) {
+                "Tag ${tag.title} not found"
+            }
             url.addQueryParameter(tagId, "ex")
         }
         url.addQueryParameter(
@@ -509,6 +575,35 @@ internal abstract class GroupleParser(
                 else -> null
             }?.let {
                 url.addQueryParameter(it, "in")
+            }
+        }
+        filter.types.forEach { type ->
+            val category = when (type) {
+                ContentType.MANGA -> "Манга"
+                ContentType.MANHWA -> "Манхва"
+                ContentType.MANHUA -> "Маньхуа"
+                ContentType.COMICS -> "Комикс"
+                ContentType.ONE_SHOT -> "Ёнкома"
+                ContentType.DOUJINSHI -> "Додзинси"
+                ContentType.OTHER -> "OEL-манга"
+                else -> return@forEach
+            }
+            val id = requireNotNull(tagsMap?.get(category.lowercase(Locale.ROOT))) {
+                "Category $category not found"
+            }
+            url.addQueryParameter(id, "in")
+        }
+        filter.contentRating.forEach { rating ->
+            val limitation = when (rating) {
+                ContentRating.SAFE -> setOf("G", "PG")
+                ContentRating.SUGGESTIVE -> setOf("PG-13", "R")
+                ContentRating.ADULT -> setOf("NC-17")
+            }
+            limitation.forEach { name ->
+                val id = requireNotNull(tagsMap?.get(name.lowercase(Locale.ROOT))) {
+                    "Limitation $name not found"
+                }
+                url.addQueryParameter(id, "in")
             }
         }
 
@@ -545,15 +640,18 @@ internal abstract class GroupleParser(
             altTitles = setOfNotNull(descDiv.selectFirst("h5")?.textOrNull()),
             coverUrl = imgDiv.selectFirst("img.lazy")?.attrAsAbsoluteUrlOrNull("data-original")?.replace("_p.", "."),
             rating = runCatching {
-                node.selectFirst(".compact-rate")?.attr("title")?.toFloatOrNull()?.div(5f)
+                node.selectFirst(".compact-rate")?.attr("title")?.toFloatOrNull()?.div(10f)
             }.getOrNull() ?: RATING_UNKNOWN,
             authors = setOfNotNull(author),
             contentRating = if (isNsfwSource) ContentRating.ADULT else null,
             tags = runCatching {
                 tileInfo?.select("a.element-link")?.mapToSet {
+                    val href = it.attr("href")
+                    val isUserTag = "/list/tag/" in href || "/tag/" in href
+                    val title = it.text().toTitleCase()
                     MangaTag(
-                        title = it.text().toTitleCase(),
-                        key = it.attr("href").substringAfterLast('/'),
+                        title = if (isUserTag) "#$title" else title,
+                        key = href.substringAfterLast('/').substringBefore('?'),
                         source = source,
                     )
                 }
@@ -680,6 +778,9 @@ internal abstract class GroupleParser(
         }
         if (result.isEmpty()) {
             throw ParseException("Genres filter element not found", url)
+        }
+        fetchAvailableTags().forEach { tag ->
+            result[tag.title.removePrefix("#").lowercase(Locale.ROOT)] = tag.key
         }
         return result
     }
