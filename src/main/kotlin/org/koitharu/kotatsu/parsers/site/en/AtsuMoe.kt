@@ -1,8 +1,11 @@
 package org.koitharu.kotatsu.parsers.site.en
 
+import okhttp3.CacheControl
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
@@ -361,12 +364,12 @@ internal class AtsuMoe(context: MangaLoaderContext) :
             .addQueryParameter("chapterId", chapterId)
             .build()
 
-        val json = webClient.httpGet(url.toString()).parseJson()
-        val readChapter = json.getJSONObject("readChapter")
-        val pages = readChapter.getJSONArray("pages")
+        var pages = fetchPagesPastLimit(url)
+        if (pages.isPromo() || pages.isShuffledNumeric()) {
+            pages = fetchPagesPastLimit(url)
+        }
 
-        return (0 until pages.length()).map { i ->
-            val page = pages.getJSONObject(i)
+        return pages.unshuffleIfNumeric().map { page ->
             val imagePath = page.getString("image")
             val fullUrl = toImageUrl(imagePath)
 
@@ -377,6 +380,56 @@ internal class AtsuMoe(context: MangaLoaderContext) :
                 source = source
             )
         }
+    }
+
+    // Past a reading limit the site shuffles every chapter's pages (still numbered 0, 1, 2, ...) or replaces them
+    // with a single promo image. Requesting its app download link lifts the limit. Because hashed-filename chapters
+    // cannot be recognised as shuffled, the limit is lifted (bypassing HTTP cache) before every chapter request.
+    private suspend fun fetchPagesPastLimit(url: HttpUrl): JSONArray {
+        runCatchingCancellable { webClient.httpHead("${apiUrl}android/download").close() }
+        return webClient.httpGet(url).parseJson().getJSONObject("readChapter").getJSONArray("pages")
+    }
+
+    private fun JSONArray.isPromo(): Boolean =
+        length() == 1 && getJSONObject(0).getString("image").contains("/static/promo/")
+
+    private fun JSONArray.isShuffledNumeric(): Boolean {
+        val numbered = parseNumericFilenameOrder() ?: return false
+        val start = numbered.minOf { it.first }
+        return numbered.indices.any { i -> numbered[i].first != start + i }
+    }
+
+    private fun JSONArray.unshuffleIfNumeric(): List<JSONObject> {
+        val numbered = parseNumericFilenameOrder()
+        if (numbered != null) {
+            return numbered.sortedBy { it.first }.map { it.second }
+        }
+        return List(length()) { i -> getJSONObject(i) }
+    }
+
+    // Older chapters use contiguous numeric filenames (0.webp, 1.webp, ...). If a chapter still arrives
+    // shuffled, those filenames reveal the true page order without waiting or failing.
+    private fun JSONArray.parseNumericFilenameOrder(): List<Pair<Int, JSONObject>>? {
+        val count = length()
+        if (count <= 1) return null
+        val result = ArrayList<Pair<Int, JSONObject>>(count)
+        var min = Int.MAX_VALUE
+        var max = Int.MIN_VALUE
+        val seen = HashSet<Int>(count)
+        for (i in 0 until count) {
+            val page = getJSONObject(i)
+            val stem = page.getString("image")
+                .substringBefore('?')
+                .substringAfterLast('/')
+                .substringBeforeLast('.')
+            val num = stem.toIntOrNull() ?: return null
+            if (!seen.add(num)) return null
+            if (num < min) min = num
+            if (num > max) max = num
+            result.add(num to page)
+        }
+        if ((min != 0 && min != 1) || max - min != count - 1) return null
+        return result
     }
 
     private fun toImageUrl(path: String): String = toCdnUrl(
@@ -395,14 +448,29 @@ internal class AtsuMoe(context: MangaLoaderContext) :
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        if (!request.url.host.startsWith("cdn.")) {
-            return chain.proceed(request)
+        val url = request.url
+        if (url.host.startsWith("cdn.")) {
+            val newRequest = request.newBuilder()
+                .header("Accept", "image/avif,image/webp,*/*")
+                .header("Referer", "https://$domain/")
+                .build()
+            return chain.proceed(newRequest)
         }
-        val newRequest = request.newBuilder()
-            .header("Accept", "image/avif,image/webp,*/*")
-            .header("Referer", "https://$domain/")
-            .build()
-        return chain.proceed(newRequest)
+        // `/api/android/download` replies with `Cache-Control: public, max-age=60`; force network so
+        // OkHttp's cache never suppresses the limit reset or replays a stale chapter response.
+        if (url.encodedPath == "/api/android/download" || url.encodedPath == "/api/read/chapter") {
+            val builder = request.newBuilder()
+                .cacheControl(CacheControl.FORCE_NETWORK)
+            if (url.encodedPath == "/api/read/chapter") {
+                val mangaId = url.queryParameter("mangaId")
+                val chapterId = url.queryParameter("chapterId")
+                if (!mangaId.isNullOrEmpty() && !chapterId.isNullOrEmpty()) {
+                    builder.header("Referer", "https://$domain/read/$mangaId/$chapterId")
+                }
+            }
+            return chain.proceed(builder.build())
+        }
+        return chain.proceed(request)
     }
 
     override suspend fun getRelatedManga(seed: Manga): List<Manga> {
