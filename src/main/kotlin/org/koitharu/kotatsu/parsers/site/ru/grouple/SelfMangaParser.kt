@@ -20,6 +20,7 @@ internal class SelfMangaParser(
 	companion object {
 
 		val domains = arrayOf(
+			"1.selfmanga.live",
 			"selfmanga.live",
 		)
 	}
