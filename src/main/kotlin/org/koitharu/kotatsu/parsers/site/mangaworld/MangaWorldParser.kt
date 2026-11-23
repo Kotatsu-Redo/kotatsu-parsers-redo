@@ -96,7 +96,7 @@ internal abstract class MangaWorldParser(
 					when (it) {
 						MangaState.ONGOING -> append("&status=ongoing")
 						MangaState.FINISHED -> append("&status=completed")
-						MangaState.ABANDONED -> append("&status=dropped")
+						MangaState.ABANDONED -> append("&status=dropped&status=canceled")
 						MangaState.PAUSED -> append("&status=paused")
 						else -> {}
 					}
@@ -165,7 +165,7 @@ internal abstract class MangaWorldParser(
 					when (div.selectFirst(".card-tags .status")?.text()?.lowercase()) {
 						"in corso" -> MangaState.ONGOING
 						"finito" -> MangaState.FINISHED
-						"droppato" -> MangaState.ABANDONED
+						"droppato", "cancellato" -> MangaState.ABANDONED
 						"in pausa" -> MangaState.PAUSED
 						else -> null
 					},
