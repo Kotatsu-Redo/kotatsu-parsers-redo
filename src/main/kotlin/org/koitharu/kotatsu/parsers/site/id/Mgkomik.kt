@@ -23,7 +23,6 @@ internal class Mgkomik(context: MangaLoaderContext) :
 	override val availableSortOrders = setOf(
 		SortOrder.UPDATED,
 		SortOrder.POPULARITY,
-		SortOrder.RATING,
 		SortOrder.NEWEST,
 		SortOrder.ALPHABETICAL,
 		SortOrder.RELEVANCE,
@@ -124,9 +123,16 @@ internal class Mgkomik(context: MangaLoaderContext) :
 			title = info.selectFirst("h1.manga-title")?.textOrNull()?.trim() ?: manga.title,
 			altTitles = altTitles,
 			coverUrl = doc.selectFirst("img.manga-cover-large")?.attrAsAbsoluteUrlOrNull("src") ?: manga.coverUrl,
-			description = doc.selectFirst("#sinopsisContainer")?.selectFirst("p")?.html(),
+			description = doc.selectFirst("#sinopsisContainer")?.let { container ->
+				val parts = container.select("span.sinopsis-preview, span.sinopsis-full")
+				if (parts.isNotEmpty()) {
+					parts.joinToString(" ") { it.textOrNull().orEmpty() }.trim()
+				} else {
+					container.selectFirst("p")?.textOrNull()?.trim()
+				}
+			}?.takeUnless { it.isNullOrEmpty() },
 			tags = tags,
-			state = parseState(info.selectFirst("span.status-badge")?.textOrNull()) ?: manga.state,
+			state = parseState(info.selectFirst(".status-badge")?.textOrNull()) ?: manga.state,
 			chapters = chapters,
 		)
 	}
@@ -150,9 +156,10 @@ internal class Mgkomik(context: MangaLoaderContext) :
 		return pages
 	}
 
+	// The image CDN rejects requests without the site as referer
 	override fun getRequestHeaders(): Headers = super.getRequestHeaders().newBuilder()
-		.add("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
-		.add("Referer", "https://$domain/")
+		.set("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
+		.set("Referer", "https://$domain/")
 		.build()
 
 	private fun buildSearchUrl(page: Int, order: SortOrder, filter: MangaListFilter): String {
@@ -199,20 +206,25 @@ internal class Mgkomik(context: MangaLoaderContext) :
 		return tags
 	}
 
+	/**
+	 * The catalogue and the search page use different values for the same order: the catalogue calls "new"
+	 * `new-manga` and "popular" `trending`, while search uses `new` and `views`. Unknown values silently fall
+	 * back to `latest` on the site, so they must not be sent.
+	 */
 	private fun mapOrder(order: SortOrder, search: Boolean): String = when (order) {
 		SortOrder.UPDATED, SortOrder.UPDATED_ASC -> "latest"
 		SortOrder.POPULARITY, SortOrder.POPULARITY_ASC -> if (search) "views" else "trending"
-		SortOrder.RATING, SortOrder.RATING_ASC -> "rating"
-		SortOrder.NEWEST, SortOrder.NEWEST_ASC -> "new"
+		SortOrder.NEWEST, SortOrder.NEWEST_ASC -> if (search) "new" else "new-manga"
 		SortOrder.ALPHABETICAL, SortOrder.ALPHABETICAL_DESC -> "alphabet"
-		SortOrder.RELEVANCE -> "relevance"
+		SortOrder.RELEVANCE -> if (search) "relevance" else "latest"
+		SortOrder.RATING, SortOrder.RATING_ASC -> if (search) "rating" else "views"
 		else -> if (search) "relevance" else "latest"
 	}
 
 	private fun parseState(value: String?): MangaState? = when (value?.trim()?.lowercase(Locale.ROOT)) {
-		"ongoing" -> MangaState.ONGOING
-		"completed" -> MangaState.FINISHED
-		"hiatus" -> MangaState.PAUSED
+		"ongoing", "on-going" -> MangaState.ONGOING
+		"completed", "complete", "end", "finished" -> MangaState.FINISHED
+		"hiatus", "on-hold", "paused" -> MangaState.PAUSED
 		else -> null
 	}
 
