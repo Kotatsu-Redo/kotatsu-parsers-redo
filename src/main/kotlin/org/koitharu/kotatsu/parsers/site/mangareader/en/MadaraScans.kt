@@ -31,7 +31,7 @@ import java.util.Locale
 
 @MangaSourceParser("MADARASCANS", "Madara Scans", "en")
 internal class MadaraScans(context: MangaLoaderContext) :
-	MangaReaderParser(context, MangaParserSource.MADARASCANS, "madarascans.com", pageSize = 20, searchPageSize = 10) {
+	MangaReaderParser(context, MangaParserSource.MADARASCANS, "madarascans.net", pageSize = 20, searchPageSize = 10) {
 
 	override val listUrl = "/series"
 	override val datePattern = "yyyy/MM/dd"

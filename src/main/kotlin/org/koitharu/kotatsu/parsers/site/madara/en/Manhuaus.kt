@@ -7,4 +7,4 @@ import org.koitharu.kotatsu.parsers.site.madara.MadaraParser
 
 @MangaSourceParser("MANHUAUS", "ManhuaUs", "en")
 internal class Manhuaus(context: MangaLoaderContext) :
-	MadaraParser(context, MangaParserSource.MANHUAUS, "manhuaus.com")
+	MadaraParser(context, MangaParserSource.MANHUAUS, "manhuaus.club")
