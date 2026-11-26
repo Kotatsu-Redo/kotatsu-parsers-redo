@@ -3,6 +3,7 @@ package org.koitharu.kotatsu.parsers
 import kotlinx.coroutines.test.runTest
 import okhttp3.HttpUrl
 import org.junit.jupiter.api.Assertions
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.params.ParameterizedTest
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
@@ -113,7 +114,10 @@ internal class MangaParserTest {
 	@MangaSources
 	fun tagsMultiple(source: MangaParserSource) = runTest(timeout = timeout) {
 		val parser = context.newParserInstance(source)
-//		if (!parser.filterCapabilities.isMultipleTagsSupported) return@runTest
+		Assumptions.assumeTrue(
+			parser.filterCapabilities.isMultipleTagsSupported,
+			"Multiple tags are not supported",
+		)
 		val availableTags = parser.getFilterOptions().availableTags
 		// Two random tags often share no title, so prefer two that a listed title actually has
 		val tags = parser.getList(MangaSearchQuery.EMPTY).shuffled().take(10).firstNotNullOfOrNull { manga ->

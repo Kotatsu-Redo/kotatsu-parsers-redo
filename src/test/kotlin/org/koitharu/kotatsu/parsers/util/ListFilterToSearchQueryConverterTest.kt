@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.util
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.model.ContentType.MANGA
 import org.koitharu.kotatsu.parsers.model.ContentType.MANHUA
@@ -65,6 +66,48 @@ class ListFilterToSearchQueryConverterTest {
         val searchQuery = convertToMangaSearchQuery(0, SortOrder.NEWEST, filter)
 
         assertEquals(MangaSearchQuery.Builder().offset(0).order(SortOrder.NEWEST).build(), searchQuery)
+    }
+
+    @Test
+    fun singleTagCapabilitiesAllowSingleTagAndRejectMultipleTest() {
+        val capabilities = MangaListFilterCapabilities(isMultipleTagsSupported = false)
+            .toMangaSearchQueryCapabilities()
+
+        val singleTagQuery = MangaSearchQuery.Builder()
+            .criterion(Include(TAG, setOf(buildMangaTag("tag1"))))
+            .build()
+        capabilities.validate(singleTagQuery)
+
+        val multipleTagsQuery = MangaSearchQuery.Builder()
+            .criterion(Include(TAG, setOf(buildMangaTag("tag1"), buildMangaTag("tag2"))))
+            .build()
+        assertThrows<IllegalArgumentException> {
+            capabilities.validate(multipleTagsQuery)
+        }
+
+        assertEquals(
+            MangaListFilterCapabilities(isMultipleTagsSupported = false),
+            capabilities.toMangaListFilterCapabilities(),
+        )
+
+        val capabilitiesWithExclusion = MangaListFilterCapabilities(
+            isMultipleTagsSupported = false,
+            isTagsExclusionSupported = true,
+        ).toMangaSearchQueryCapabilities()
+
+        val includeAndExcludeSingleQuery = MangaSearchQuery.Builder()
+            .criterion(Include(TAG, setOf(buildMangaTag("tag1"))))
+            .criterion(Exclude(TAG, setOf(buildMangaTag("tag2"))))
+            .build()
+        capabilitiesWithExclusion.validate(includeAndExcludeSingleQuery)
+
+        assertEquals(
+            MangaListFilterCapabilities(
+                isMultipleTagsSupported = false,
+                isTagsExclusionSupported = true,
+            ),
+            capabilitiesWithExclusion.toMangaListFilterCapabilities(),
+        )
     }
 
     private fun buildMangaTag(name: String): MangaTag {
