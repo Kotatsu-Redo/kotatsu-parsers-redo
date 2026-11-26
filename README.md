@@ -36,7 +36,7 @@ JVM and Android applications.
     }
     ```
 
-   Versions are available on [JitPack](https://jitpack.io/#KotatsuApp/kotatsu-parsers)
+   Versions are available on [JitPack](https://jitpack.io/#Kotatsu-Redo/kotatsu-parsers-redo)
 
    When used in Android
    projects, [core library desugaring](https://developer.android.com/studio/write/java8-support#library-desugaring) with
@@ -52,7 +52,7 @@ JVM and Android applications.
 
    `mangaLoaderContext` is an implementation of the `MangaLoaderContext` class.
    See examples
-   of [Android](https://github.com/KotatsuApp/Kotatsu/blob/devel/app/src/main/kotlin/org/koitharu/kotatsu/core/parser/MangaLoaderContextImpl.kt)
+   of [Android](https://github.com/Kotatsu-Redo/Kotatsu-Redo/blob/devel/app/src/main/kotlin/org/koitharu/kotatsu/core/parser/MangaLoaderContextImpl.kt)
    and [Non-Android](https://github.com/KotatsuApp/kotatsu-dl/blob/master/src/main/kotlin/org/koitharu/kotatsu/dl/parsers/MangaLoaderContextImpl.kt)
    implementation.
 
